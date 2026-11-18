@@ -21,3 +21,9 @@ Materials remain clearly recognizable; show physical contact, realistic thicknes
 ## Story-specific nonnegotiables
 
 Fix appearance in `characters` and carry verbatim across shots. One speaker at a time in a short shot; leave roughly 1 second of silence at the end. Keep subtitles, surveillance UI, date/timecode and logos out of generation prompts; add only in postproduction with user approval.
+
+
+## Preferred Gemini → Flow Agent handoff
+- Use `gemini-brief` for Gemini web/Antigravity sessions (no key needed) or `draft --provider gemini` with `GEMINI_API_KEY`/`GEMINI_MODEL` when an API call is authorized. Validate and review resulting project.json.
+- Run `flow-pack` to create `flow_agent_handoff.md`, individual prompts and `flow_queue.json`. Flow Agent can generate multiple variations, but independent multi-scene batching is not guaranteed; fall back to shot-by-shot generation.
+- Never report Flow rendering/download success until actual media files have been ingested. Credits may be spent; retain confirmation before each paid generation.

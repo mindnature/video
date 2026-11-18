@@ -5,20 +5,15 @@ import json
 import os
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
+from urllib.parse import quote
 
 from .core import StudioError, validate
 from .templates import preset
 
 
-def draft(idea: str, mode: str, title: str, count: int | None = None) -> dict:
-    base = os.getenv("VIDEO_LLM_BASE_URL", "").rstrip("/")
-    key = os.getenv("VIDEO_LLM_API_KEY", "")
-    model = os.getenv("VIDEO_LLM_MODEL", "")
-    if not (base and key and model):
-        raise StudioError("Set VIDEO_LLM_BASE_URL, VIDEO_LLM_API_KEY and VIDEO_LLM_MODEL before 'draft'.")
-    # Do not let a prompt dynamically control API endpoints or browser actions.
-    if not base.startswith("https://") and not base.startswith("http://127.0.0.1") and not base.startswith("http://localhost"):
-        raise StudioError("LLM endpoint must be HTTPS (or localhost for a local model).")
+def draft(idea: str, mode: str, title: str, count: int | None = None, provider: str = "compatible") -> dict:
+    if provider not in ("compatible", "gemini"):
+        raise StudioError("provider must be compatible or gemini")
     example = preset(mode, title)
     if count is None:
         count = 6 if mode == "handcraft" else 5
@@ -32,17 +27,37 @@ def draft(idea: str, mode: str, title: str, count: int | None = None) -> dict:
         "beats 按时间递增不重叠，每个区间不得超过本镜时长；dialogue 每条须包含speaker,text,start,end。"
         "请用可执行的具体动作，而非空洞的形容词。"
     )
-    payload = {"model": model, "messages": [{"role": "system", "content": instructions},
-                                            {"role": "user", "content": idea}], "temperature": 0.5}
-    request = Request(base + "/chat/completions", data=json.dumps(payload).encode("utf-8"),
-                      headers={"Authorization": "Bearer " + key, "Content-Type": "application/json"}, method="POST")
+    if provider == "gemini":
+        key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
+        model = os.getenv("GEMINI_MODEL")
+        if not key or not model:
+            raise StudioError("Set GEMINI_API_KEY and GEMINI_MODEL for --provider gemini; the model must be available to your account")
+        url = "https://generativelanguage.googleapis.com/v1beta/models/" + quote(model, safe="") + ":generateContent"
+        payload = {"systemInstruction": {"parts": [{"text": instructions}]},
+                   "contents": [{"role": "user", "parts": [{"text": idea}]}],
+                   "generationConfig": {"responseMimeType": "application/json", "temperature": 0.5}}
+        headers = {"x-goog-api-key": key, "Content-Type": "application/json"}
+    else:
+        base = os.getenv("VIDEO_LLM_BASE_URL", "").rstrip("/")
+        key = os.getenv("VIDEO_LLM_API_KEY", "")
+        model = os.getenv("VIDEO_LLM_MODEL", "")
+        if not (base and key and model):
+            raise StudioError("Set VIDEO_LLM_BASE_URL, VIDEO_LLM_API_KEY and VIDEO_LLM_MODEL before 'draft'.")
+        if not base.startswith("https://") and not base.startswith("http://127.0.0.1") and not base.startswith("http://localhost"):
+            raise StudioError("LLM endpoint must be HTTPS (or localhost for a local model).")
+        url = base + "/chat/completions"
+        payload = {"model": model, "messages": [{"role": "system", "content": instructions},
+                                                 {"role": "user", "content": idea}], "temperature": 0.5}
+        headers = {"Authorization": "Bearer " + key, "Content-Type": "application/json"}
+    request = Request(url, data=json.dumps(payload).encode("utf-8"), headers=headers, method="POST")
     try:
         with urlopen(request, timeout=120) as resp:
             obj = json.load(resp)
     except (HTTPError, URLError) as exc:
         raise StudioError(f"LLM request failed: {type(exc).__name__} ({getattr(exc, 'code', 'connection')})") from exc
     try:
-        content = obj["choices"][0]["message"]["content"].strip()
+        content = (obj["candidates"][0]["content"]["parts"][0]["text"] if provider == "gemini"
+                   else obj["choices"][0]["message"]["content"]).strip()
         if content.startswith("```"):
             content = content.split("\n", 1)[1].rsplit("```", 1)[0].strip()
         result = json.loads(content)

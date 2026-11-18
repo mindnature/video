@@ -113,3 +113,33 @@ python -m videostudio --help
 不要把 OAuth / Google Cookie / LLM Key / 原视频素材提交进仓库。不要公开 CDP 端口。机器自动化只能操作你有权使用的网页，不能绕过登录和平台付费机制。该项目暂不支持自动投放视频到小红书、抖音或视频号。
 
 MIT License · 项目仓库：<https://github.com/mindnature/video>
+
+
+## V0.2：Gemini 写分镜 + Google Flow Agent 生成
+
+**默认推荐不必配置 Gemini API：** 由 Gemini 网页或 Antigravity 执行创意、分镜和提示词设计，Google Flow 网站内置 Agent 负责生成，Video Studio 负责文件归档与剪辑。
+
+```bash
+video-studio init projects/flower --preset handcraft --title "东方花影"
+video-studio gemini-brief projects/flower --idea "真实叶片和花瓣逐层构成东方仕女手工画，六镜 9:16 竖屏"
+```
+
+将 `projects/flower/production/gemini_director_brief.md` 复制给 Gemini；Gemini 返回项目 JSON 后，审核并备份原版，再保存为 `projects/flower/project.json`。然后运行：
+
+```bash
+video-studio plan projects/flower
+video-studio flow-pack projects/flower
+```
+
+将 `production/flow_agent_handoff.md` 提交给已经登录的 **Google Flow Agent**；若网站不能一次处理六条独立分镜，就依次复制 `production/prompts/shot_01.txt` 等逐条生成。`flow_queue.json` 记录每镜输入，供素材核对。批量生成多个**变体**是 Flow Agent 官方支持的能力，但不是对所有账号保证可一次批量执行**不同镜头**。不要在没有核算额度的情况下自动提交生成。首尾帧及材料参考图需在 Flow 界面另行上传；生成时长以账户当前可选项为准，可能不同于项目规划的 10/12 秒。
+
+若需要 Gemini API 自动创作 `project.json`，可以设置 `GEMINI_API_KEY`、`GEMINI_MODEL`（填写该账号实际可用的模型 ID），运行：
+
+```bash
+video-studio draft projects/film --provider gemini --idea "花瓣制作东方仕女" --preset handcraft --title "东方花影" --shots 6
+video-studio flow-pack projects/film
+```
+
+API 模式需要自行管理密钥及 API 计费；没有密钥就使用前述 Gemini 网页任务书流程。Flow Agent 是否能执行多镜头批处理需要在你的账号实测，项目不会谎称它已完成生成或下载。
+
+官方资料：[Google Flow Agent 帮助](https://support.google.com/flow/answer/17093911) · [Flow 视频生成](https://support.google.com/flow/answer/16353334) · [Gemini API 结构化输出](https://ai.google.dev/gemini-api/docs/structured-output)

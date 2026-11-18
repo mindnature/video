@@ -10,6 +10,7 @@ from pathlib import Path
 from . import __version__
 from .core import StudioError, export, ingest, load_project, qa, render, write_json
 from .llm import draft
+from .handoff import gemini_brief, flow_pack
 from .templates import preset
 
 
@@ -30,6 +31,12 @@ def parser() -> argparse.ArgumentParser:
     d.add_argument("--preset", choices=["handcraft", "story"], default="handcraft")
     d.add_argument("--title", default="未命名作品")
     d.add_argument("--shots", type=int)
+    d.add_argument("--provider", choices=["compatible", "gemini"], default="compatible", help="Gemini API or OpenAI-compatible API")
+    g = sub.add_parser("gemini-brief", help="export a paste-ready Gemini director prompt (no API key)")
+    g.add_argument("project")
+    g.add_argument("--idea", required=True)
+    pack = sub.add_parser("flow-pack", help="export a Flow Agent instruction pack and individual shot queue")
+    pack.add_argument("project")
     incoming = sub.add_parser("ingest", help="version and hash an existing video/voice asset")
     incoming.add_argument("project")
     incoming.add_argument("--shot", required=True)
@@ -68,9 +75,16 @@ def main(argv: list[str] | None = None) -> int:
                 raise StudioError("project.json already exists; no overwrite allowed")
             if args.shots is not None and not (1 <= args.shots <= 20):
                 raise StudioError("--shots must be 1–20")
-            result = draft(args.idea, args.preset, args.title, args.shots)
+            result = draft(args.idea, args.preset, args.title, args.shots, provider=args.provider)
             write_json(root / "project.json", result)
             print(f"Draft created: {root / 'project.json'}; review each shot before plan/render")
+        elif args.command == "gemini-brief":
+            root, project = load_project(args.project)
+            print(f"Gemini brief: {gemini_brief(root, project, args.idea)}")
+        elif args.command == "flow-pack":
+            root, project = load_project(args.project)
+            handoff, manifest = flow_pack(root, project)
+            print(f"Flow Agent handoff: {handoff}\nQueue manifest: {manifest}")
         elif args.command == "plan":
             root, project = load_project(args.project)
             print(f"Generated production kit: {export(root, project)}")
@@ -97,7 +111,7 @@ def main(argv: list[str] | None = None) -> int:
                 print("playwright: installed")
             except ImportError:
                 print("playwright: optional; install .[flow] for flow-assist")
-            print("LLM: optional; set VIDEO_LLM_BASE_URL / VIDEO_LLM_API_KEY / VIDEO_LLM_MODEL for draft")
+            print("LLM: optional; use --provider gemini with GEMINI_API_KEY and GEMINI_MODEL, or set VIDEO_LLM_* for compatible")
         return 0
     except (StudioError, OSError, ValueError) as error:
         print(f"Error: {error}", file=sys.stderr)
