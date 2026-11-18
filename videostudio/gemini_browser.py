@@ -96,9 +96,15 @@ def director_prompt(idea: str, mode: str, title: str, shots: int, reference_coun
         f"已指定的参考图数量：{reference_count}。如果看到参考图，先分析画面，不要虚构材料及工序。\n"
         "每镜提供 id、scene、action、camera、duration、materials、beats、dialogue。"
         "handcraft 默认竖版 9:16 每镜10秒，明确材料真实可辨和手/工具执行每一步，无瞬移、无材料凭空出现。"
-        "story 默认横版16:9每镜12秒，角色设定跨镜一致，避免多人同时说话，末段留至少1秒安静反应。"
+        "story 默认横版16:9每镜12秒；general 按创意自行设计，不限定古装或演员数量。"
+        "每镜只在 cast 中列出本镜人物，每镜 subject_ids 列出本镜产品或物件；characters/subjects 仅写跨镜身份外观，不写永久站位。"
+        "每镜可指定 acceptance: start_visible/end_visible/end_absent/required_events/audio_checks，均为字符串列表。"
+        "遇到繁复动作应分镜或设计合理的时间跳切，不强迫短时间内完成太多任务。"
         "beats 不重叠且在该镜头时长以内；有对白时包含 speaker、text、start、end。"
-        "所有文字/字幕/UI 交给后期，生成提示词中不要要求模型绘制乱码文字。\n"
+        "必须主动分析用户明确提出的后期风格、声音和字幕要求：postproduction.style 只能为 clean/surveillance/vintage/cinematic；"
+        "若用户要求监控视频，选择 surveillance 并设置 camera_prefix、clock_start（可不填使用零起点）、location；"
+        "若要求配音或字幕，在 postproduction.voice/subtitles 使用 on，普通内容可以 auto。"
+        "不要让视频模型绘制乱码文字，监控HUD和字幕由 Video Studio 的后期渲染负责。\n"
         "严格按此 JSON 字段结构输出，但必须重写主题和镜头：\n"
         + json.dumps(example, ensure_ascii=False, indent=2)
     )

@@ -24,21 +24,36 @@ def preset(name: str, title: str) -> dict:
                           "beats": [{"start": a, "end": b, "visual": v} for a, b, v in beats], "dialogue": []})
         return {"title": title, "mode": "handcraft", "aspect_ratio": "9:16", "fps": 30,
                 "style": "李子柒式静谧手作纪录片氛围，真实桌面微距摄影，柔和自然光，浅景深，不模仿具体镜头",
-                "characters": {}, "shots": shots}
+                "characters": {}, "postproduction": {"style":"clean", "voice":"auto", "subtitles":"auto"}, "shots": shots}
     if name == "story":
         shots = []
-        scenes = ["正经开场", "第一个反差", "误会升级", "夜间插曲", "反转收束"]
+        scenes = ["人物与场景建立", "冲突触发", "动作推进", "局面变化", "结局收束"]
         for i, scene in enumerate(scenes, start=1):
             shots.append({"id": f"{i:02d}", "scene": scene,
-                          "action": "在本镜写入一条可视化的动作反差，并由旁人点破。",
-                          "camera": "固定35度斜俯拍，人物左右站位稳定。",
-                          "duration": 12, "materials": [],
-                          "beats": [{"start": 0, "end": 4, "visual": "建立看似严肃的局面。"},
-                                    {"start": 4, "end": 8, "visual": "一个可见的小动作暴露真实想法。"},
-                                    {"start": 8, "end": 12, "visual": "旁人反应，最后1.5秒静止留白。"}],
+                          "action": "在本镜写入一项可拍摄的剧情推进动作与真实的主体状态变化。",
+                          "camera": "根据剧情选择固定机位或运动机位，明确人物位置。",
+                          "duration": 12, "materials": [], "cast": ["角色A", "角色B"],
+                          "beats": [{"start": 0, "end": 4, "visual": "明确人物动机和空间关系。"},
+                                    {"start": 4, "end": 8, "visual": "一项可观察的动作推动故事。"},
+                                    {"start": 8, "end": 12, "visual": "剧情状态明确落地，结尾留白。"}],
                           "dialogue": []})
         return {"title": title, "mode": "story", "aspect_ratio": "16:9", "fps": 30,
-                "style": "真实古装喜剧短片，画面纯净无UI，跨镜头人物形象一致",
-                "characters": {"角色A": "固定服装颜色、发型、五官与年龄的唯一描述", "角色B": "固定服装颜色、发型、五官与年龄的唯一描述"},
+                "style": "人物剧情短片，摄影、美术、动作风格取决于具体创意",
+                "characters": {"角色A": "固定外貌身份描述（不含跨镜站位）", "角色B": "固定外貌身份描述（不含跨镜站位）"},
+                "postproduction": {"style": "clean", "voice": "auto", "subtitles": "auto"}, "shots": shots}
+    if name == "general":
+        scenes = ["主题建立", "核心特征", "过程与细节", "成果收束"]
+        shots = [
+            {"id": f"{i:02d}", "scene": scene, "action": "由创意替换为具体、可拍摄的行动与主体状态",
+             "camera": "根据当前镜头目标选择合理机位", "duration": 10, "materials": [], "cast": [],
+             "subject_ids": [], "beats": [{"start": 0, "end": 4, "visual": "建立本镜主体和空间"},
+                                     {"start": 4, "end": 8, "visual": "执行一项清晰的主体动作"},
+                                     {"start": 8, "end": 10, "visual": "停留在完成后的可辨状态"}],
+             "dialogue": [], "acceptance": {"required_events": ["完成本镜的核心动作"]}}
+            for i, scene in enumerate(scenes, start=1)
+        ]
+        return {"title": title, "mode": "general", "aspect_ratio": "9:16", "fps": 30,
+                "style": "按创意决定影像风格", "characters": {}, "subjects": {},
+                "postproduction": {"style": "clean", "voice": "auto", "subtitles": "auto"},
                 "shots": shots}
     raise ValueError("Unknown preset")

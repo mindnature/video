@@ -26,7 +26,8 @@ def gemini_brief(root: Path, project: dict, idea: str) -> Path:
         "有台词才填写 dialogue，写明 speaker/text/start/end。\n"
         "手作必须真实可制作：不允许材料自动飞入或瞬间成形，清晰展示手部/工具/固定方式。"
         "真实画面首尾帧若尚未提供，只能写规划要求，不能声称图片已经生成。\n"
-        "所有 beat 按顺序、不重叠、不得超过镜头 duration。"
+        "所有 beat 按顺序、不重叠、不得超过镜头 duration；每镜用 cast/subject_ids 引用该镜出场主体。"
+        "按创意配置 postproduction.style 与 voice/subtitles，写清每镜 acceptance 的开头、结尾和音画验收条件。"
         "不要生成 UI 字幕水印，最后留至少 1 秒停顿；按项目要求保证场景连续性。\n\n"
         "## JSON 字段模板（仅参考结构，全部内容须按创意重写）\n```json\n"
         + json.dumps(template, ensure_ascii=False, indent=2)

@@ -34,3 +34,13 @@ When the user asks for "one-click" production, read `.agents/skills/video-studio
 
 ## V1.1 preferred web workflow
 Default to `start --provider gemini-web --gemini-config <verified local config>`; the same dedicated Chrome profile hosts exactly one Gemini and one Flow tab. A Gemini browser submission is recorded before clicking; on failure, NEVER silently resend. Use `receive-gemini` for manually copied valid JSON or explicit `resolve-gemini --action retry` to restart after operator inspection. Only approve storyboard, Flow credit budget, each shot, and final master on actual human consent.
+
+## V1.2 general-quality rules (apply to ALL genres)
+
+- Read docs/QUALITY_V12.md first. Use `general` for product/travel/landscape; never force a story or product into an ancient-comedy template.
+- Every shot MUST scope the cast/subject_ids. Keep only persistent identity in characters/subjects; no cross-shot frozen positions.
+- Author shot.acceptance with specific observable beginning/ending states, necessary action events, and audio checks when relevant. Avoid overloaded action windows and use time cuts when necessary.
+- Before approving storyboard check `production/plan_audit.json` and fix all ERROR findings; discuss WARN findings with the operator.
+- Read postproduction.style/voice/subtitles from the user's requested look. Clean is default; surveillance HUD/timecode/noise must be rendered in post, not demanded of Flow.
+- Review the POSTPROCESSED preview, and first/middle/end images, with the user before passing a candidate. `verify-shot` records operator judgment, not automatic image understanding. Never mark it pass without user confirmation.
+- For dialogue and contact sound, verify the actual time of speech, subtitle appearance and sound cues against visible action; planned times are only drafts.

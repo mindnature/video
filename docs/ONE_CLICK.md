@@ -1,4 +1,4 @@
-# Video Studio V1.1｜双网页驱动：Codex + Gemini Chrome + Google Flow Chrome
+# Video Studio V1.2｜双网页一键制片与通用质量验收
 
 **默认无需 Gemini API Key。** 用户通过专用 Chrome 分别登录 [Gemini](https://gemini.google.com/app) 与 [Google Flow](https://labs.google/fx/tools/flow)，Codex 负责自动提交分镜与镜头、素材管理、审核节点和 FFmpeg 后期。
 
@@ -98,3 +98,17 @@ Flow 提交后若不确定是否扣费，不得自动重试：检查 Flow，再�
 - 已登录 Chrome 不等于无限授权或可跳过 Google 登录验证；所有额度操作需要明确预算审批。项目不读取 Cookie，不调用非公开网站接口，不绕过验证码、风控或付费要求。
 
 **成功判定**：只有实际下载的镜头媒体通过 ffprobe、用户逐镜审核、完整合成并最终批准后，才能声称视频已完成。
+
+
+### V1.2 必须执行的验收步骤
+
+新版本分镜文件 `production/plan_audit.json` 会自动检查人物作用域、身份与动作的冲突、结束画面矛盾和动作密度。只有 `ERROR=0` 才可批准分镜。
+
+每个生成素材会尝试导出 `production/review/shot_XX_*_review.mp4`，含所需监控/怀旧/电影风格，以及按项目配置的配音和字幕。请看完整片段，不能只查看抽帧。对于带 `acceptance` 或需要风格包装的镜头，先输入：
+
+```bash
+video-studio verify-shot projects/<slug> --shot 01 --result pass --note "完整观看，确认主体、结尾、音画及风格满足要求"
+video-studio approve projects/<slug> --stage shot --shot 01
+```
+
+不要在未看过真实生成素材时执行 `verify-shot`。更详细说明见 `docs/QUALITY_V12.md`。

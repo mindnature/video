@@ -66,7 +66,7 @@ def start(root: Path, idea: str, mode: str, title: str, shots: int,
     elif provider == "template":
         project = preset(mode, title)
         if len(project["shots"]) != shots:
-            raise StudioError("Template only supports preset shot count; choose 6 for handcraft or 5 for story")
+            raise StudioError("Template only supports its preset shot count; choose 6 handcraft, 5 story, or 4 general")
     else:
         raise StudioError("provider must be gemini-web, gemini or template")
     # Do not start a browser or consume Flow credits here.
@@ -184,6 +184,10 @@ def replan(root: Path) -> dict:
         raise StudioError("Cannot replan a project with Flow submissions; create a new project to preserve traceability")
     export(root, project)
     flow_pack(root, project)
+    from .quality import audit_plan
+    check = audit_plan(project)
+    if not check["ready"]:
+        raise StudioError(f"Plan has {check['errors']} blocking conflict(s); inspect production/plan_audit.json")
     state["shots"] = {shot["id"]: {"status": "pending", "attempts": 0, "candidates": [], "approved_file": None}
                       for shot in project["shots"]}
     state["phase"] = "awaiting_storyboard_approval"
@@ -202,6 +206,10 @@ def approve(root: Path, stage: str, shot_id: str | None = None, max_generations:
             raise StudioError("Not awaiting storyboard review")
         export(root, project)
         flow_pack(root, project)
+        from .quality import audit_plan
+        check = audit_plan(project)
+        if not check["ready"]:
+            raise StudioError(f"Plan has {check['errors']} blocking conflict(s); inspect production/plan_audit.json")
         state["approved_plan_digest"] = digest(root / "project.json")
         state["phase"] = "awaiting_credit_approval"
         event(state, "approved_storyboard", sha256=state["approved_plan_digest"])
@@ -223,6 +231,12 @@ def approve(root: Path, stage: str, shot_id: str | None = None, max_generations:
             raise StudioError("Shot has no downloaded candidate awaiting approval")
         if not item["candidates"]:
             raise StudioError("Cannot approve without a real imported file")
+        selected_shot = next(s for s in project["shots"] if s["id"] == shot_id)
+        requires_check = bool(selected_shot.get("acceptance")) or project.get("postproduction", {}).get("style", "clean") != "clean"
+        if requires_check and item.get("human_verification", {}).get("result") != "pass":
+            raise StudioError("Run 'verify-shot --shot ID --result pass --note ...' after watching the entire candidate and its end frame")
+        if project.get("postproduction", {}).get("style", "clean") != "clean" and not item.get("review_clip"):
+            raise StudioError("Styled review clip was not rendered; fix postproduction before approving")
         chosen = Path(item["candidates"][-1])
         if not (root / chosen).is_file():
             raise StudioError("Imported candidate is missing from disk")
@@ -277,22 +291,65 @@ def _record_candidate(root: Path, state: dict, shot_id: str, dest: Path) -> None
     item["status"] = "awaiting_review"
     state["phase"] = "awaiting_shot_approval"
     event(state, "received_media", shot=shot_id, file=relative, sha256=digest(dest))
-    _make_preview(root, shot_id, dest)
+    try:
+        item["review_clip"] = _make_preview(root, shot_id, dest)
+        item.pop("review_error", None)
+    except Exception as exc:
+        item["review_clip"] = None
+        item["review_error"] = f"{type(exc).__name__}: {str(exc)[:220]}"
+        event(state, "preview_failed", shot=shot_id, error=item["review_error"])
+    item.pop("human_verification", None)
     save_state(root, state)
 
 
-def _make_preview(root: Path, shot_id: str, src: Path) -> None:
-    """Best-effort contact sheet; metadata QA is still not visual QA."""
+def _make_preview(root: Path, shot_id: str, src: Path) -> str | None:
+    """Render the actual postproduced shot for review, including a near-final frame.
+
+    A still sampler cannot prove whether a person left the scene or whether lips
+    were synchronized. The operator must watch the entire review clip.
+    """
     from .core import need_binary
     import subprocess
-    dest = root / "production" / "review" / f"shot_{shot_id}_{src.stem}.jpg"
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        subprocess.run([need_binary("ffmpeg"), "-hide_banner", "-loglevel", "error", "-y", "-i", str(src),
-                        "-vf", "fps=1/2,scale=320:-2,tile=3x2:nb_frames=6", "-frames:v", "1", str(dest)],
+    root, project = load_project(root)
+    dest = root / "production" / "review"
+    dest.mkdir(parents=True, exist_ok=True)
+    from .core import probe
+    info = probe(src)
+    duration = float(info.get("format", {}).get("duration", 0))
+    if duration <= 0:
+        # A mock/malformed test source cannot generate a real review clip.
+        return None
+    preview = dest / f"shot_{shot_id}_{src.stem}_review.mp4"
+    output = render(root, project, preview, shot_ids=[shot_id])
+    for tag, when in (("first", 0), ("middle", max(0, duration * .5)),
+                      ("end", max(0, min(duration, next(s["duration"] for s in project["shots"] if s["id"] == shot_id)) - 0.15))):
+        image = dest / f"shot_{shot_id}_{src.stem}_{tag}.jpg"
+        subprocess.run([need_binary("ffmpeg"), "-hide_banner", "-loglevel", "error", "-y",
+                        "-ss", f"{when:.3f}", "-i", str(output), "-frames:v", "1", str(image)],
                        check=True, capture_output=True, timeout=30)
-    except (StudioError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
-        pass
+    return output.relative_to(root).as_posix()
+
+
+def verify_shot(root: Path, shot_id: str, result: str, note: str) -> dict:
+    """Record a real human's assessment of visible video, not an AI guess."""
+    root, project = load_project(root)
+    state = get_state(root)
+    if state["phase"] != "awaiting_shot_approval" or state["shots"].get(shot_id, {}).get("status") != "awaiting_review":
+        raise StudioError("No candidate awaiting shot verification")
+    if result not in ("pass", "fail") or not note.strip():
+        raise StudioError("Specify --result pass/fail and a human-reviewed --note")
+    item = state["shots"][shot_id]
+    item["human_verification"] = {"result": result, "note": note, "at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
+    from .quality import acceptance_checks
+    candidate = item["candidates"][-1]
+    shot = next(s for s in project["shots"] if s["id"] == shot_id)
+    write_json(root / "production" / "review" / f"shot_{shot_id}_human_review.json", {
+        "shot": shot_id, "candidate": candidate, "review_clip": item.get("review_clip"),
+        "review_error": item.get("review_error"), "review": item["human_verification"],
+        "checklist": acceptance_checks(shot), "limitations": "Human signoff, not automated visual verification"})
+    event(state, "human_verified_shot", shot=shot_id, result=result, note=note[:300])
+    save_state(root, state)
+    return state
 
 
 def reject_shot(root: Path, shot_id: str, reason: str) -> dict:
@@ -302,6 +359,7 @@ def reject_shot(root: Path, shot_id: str, reason: str) -> dict:
         raise StudioError("No clip is currently awaiting approval for this shot")
     item = state["shots"][shot_id]
     item["status"] = "pending"
+    item.pop("human_verification", None)
     state["phase"] = "ready_to_generate" if state["credits_remaining"] else "awaiting_extra_credit_approval"
     event(state, "rejected_shot", shot=shot_id, reason=reason)
     save_state(root, state)
@@ -419,7 +477,7 @@ def summary(state: dict) -> str:
         "ready_to_generate": "Run advance to generate one pending shot (or render if all approved).",
         "generation_uncertain": "Inspect Flow: submission may have consumed credits. Use resolve --shot ID, then receive the file. Never auto-retry.",
         "awaiting_download": "Download video in Flow and use receive --shot ID --file PATH.",
-        "awaiting_shot_approval": "Watch the clip and contact sheet. Use approve --stage shot --shot ID, or reject --shot ID --reason ...",
+        "awaiting_shot_approval": "Watch the styled review clip AND end-frame stills. For shots with acceptance/style, run verify-shot --shot ID --result pass --note ..., then approve --stage shot --shot ID; otherwise reject.",
         "awaiting_extra_credit_approval": "More paid generations require approve --stage credits --max-generations N.",
         "awaiting_final_approval": "Watch exports/final_master*.mp4, then approve --stage final.",
         "completed": "Completed. All assets and historical versions were retained.",

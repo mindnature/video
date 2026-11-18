@@ -21,7 +21,7 @@ def parser() -> argparse.ArgumentParser:
     sub = p.add_subparsers(dest="command", required=True)
     init = sub.add_parser("init", help="create an editable shot project")
     init.add_argument("name", help="directory to create")
-    init.add_argument("--preset", choices=["handcraft", "story"], default="handcraft")
+    init.add_argument("--preset", choices=["handcraft", "story", "general"], default="handcraft")
     init.add_argument("--title", default="未命名作品")
     init.add_argument("--force", action="store_true", help="overwrite project.json ONLY")
     planning = sub.add_parser("plan", help="export shot prompts, storyboard, CSV voice lines and SRT")
@@ -29,7 +29,7 @@ def parser() -> argparse.ArgumentParser:
     d = sub.add_parser("draft", help="optional LLM-assisted idea-to-shot JSON")
     d.add_argument("name", help="new project directory")
     d.add_argument("--idea", required=True)
-    d.add_argument("--preset", choices=["handcraft", "story"], default="handcraft")
+    d.add_argument("--preset", choices=["handcraft", "story", "general"], default="handcraft")
     d.add_argument("--title", default="未命名作品")
     d.add_argument("--shots", type=int)
     d.add_argument("--provider", choices=["compatible", "gemini"], default="compatible", help="Gemini API or OpenAI-compatible API")
@@ -47,8 +47,10 @@ def parser() -> argparse.ArgumentParser:
     making = sub.add_parser("render", help="normalize clips, concatenate, optionally mix voice and burn subtitles")
     making.add_argument("project")
     making.add_argument("--output", type=Path)
-    making.add_argument("--mix-voice", action="store_true")
-    making.add_argument("--burn-subtitles", action="store_true")
+    making.add_argument("--mix-voice", action="store_const", const=True, default=None, help="force voice mixing instead of project auto setting")
+    making.add_argument("--no-voice", action="store_const", dest="mix_voice", const=False)
+    making.add_argument("--burn-subtitles", action="store_const", const=True, default=None)
+    making.add_argument("--no-subtitles", action="store_const", dest="burn_subtitles", const=False)
     review = sub.add_parser("qa", help="metadata checks and missing-asset report")
     review.add_argument("project")
     flow = sub.add_parser("flow-assist", help="populate Google Flow prompt in one open user Chrome tab")
@@ -60,7 +62,7 @@ def parser() -> argparse.ArgumentParser:
     a.add_argument("name", help="new project directory")
     a.add_argument("--idea", required=True)
     a.add_argument("--reference", type=Path, action="append", default=[], help="reference image; repeat as needed")
-    a.add_argument("--preset", choices=["handcraft", "story"], default="handcraft")
+    a.add_argument("--preset", choices=["handcraft", "story", "general"], default="handcraft")
     a.add_argument("--title", default="未命名作品")
     a.add_argument("--shots", type=int, default=0)
     a.add_argument("--provider", choices=["gemini-web", "gemini", "template"], default="gemini-web",
@@ -81,6 +83,11 @@ def parser() -> argparse.ArgumentParser:
     recv.add_argument("project")
     recv.add_argument("--shot", required=True)
     recv.add_argument("--file", required=True, type=Path)
+    verify = sub.add_parser("verify-shot", help="record human visual end-state/style/audio review before approval")
+    verify.add_argument("project")
+    verify.add_argument("--shot", required=True)
+    verify.add_argument("--result", choices=["pass", "fail"], required=True)
+    verify.add_argument("--note", required=True)
     rej = sub.add_parser("reject", help="reject a candidate, keep original, require authorized retry")
     rej.add_argument("project")
     rej.add_argument("--shot", required=True)
@@ -152,7 +159,7 @@ def main(argv: list[str] | None = None) -> int:
             from .flow import assist
             assist(args.prompt, args.selector, args.button, args.submit)
         elif args.command == "start":
-            count = args.shots or (6 if args.preset == "handcraft" else 5)
+            count = args.shots or (6 if args.preset == "handcraft" else 4 if args.preset == "general" else 5)
             state = production.start(Path(args.name), args.idea, args.preset, args.title, count,
                                      args.reference, args.provider, gemini_config=args.gemini_config)
             print(production.summary(state))
@@ -167,6 +174,9 @@ def main(argv: list[str] | None = None) -> int:
             print(production.summary(state))
         elif args.command == "receive":
             state = production.receive(Path(args.project), args.shot, args.file)
+            print(production.summary(state))
+        elif args.command == "verify-shot":
+            state = production.verify_shot(Path(args.project), args.shot, args.result, args.note)
             print(production.summary(state))
         elif args.command == "reject":
             state = production.reject_shot(Path(args.project), args.shot, args.reason)

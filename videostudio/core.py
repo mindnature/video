@@ -31,8 +31,8 @@ def write_json(path: Path, value: Any) -> None:
 def validate(project: dict) -> None:
     if not isinstance(project, dict):
         raise StudioError("project.json must contain a JSON object")
-    if project.get("mode") not in ("handcraft", "story"):
-        raise StudioError("mode must be 'handcraft' or 'story'")
+    if project.get("mode") not in ("handcraft", "story", "general"):
+        raise StudioError("mode must be handcraft, story or general")
     if project.get("aspect_ratio") not in ("9:16", "16:9", "1:1", "3:4"):
         raise StudioError("aspect_ratio must be 9:16, 16:9, 1:1 or 3:4")
     if not isinstance(project.get("title"), str) or not project["title"].strip():
@@ -43,6 +43,28 @@ def validate(project: dict) -> None:
     shots = project.get("shots")
     if not isinstance(shots, list) or not shots:
         raise StudioError("shots must contain at least one shot")
+    for field in ("characters", "subjects"):
+        value = project.get(field, {})
+        if not isinstance(value, dict) or any(not isinstance(k, str) or not isinstance(v, str) for k, v in value.items()):
+            raise StudioError(f"{field} must be a dictionary of identity strings")
+    post = project.get("postproduction", {})
+    from .quality import SUPPORTED_STYLES, ACCEPTANCE_FIELDS
+    if not isinstance(post, dict) or post.get("style", "clean") not in SUPPORTED_STYLES:
+        raise StudioError(f"postproduction.style must be one of {sorted(SUPPORTED_STYLES)}")
+    if post.get("style") == "surveillance":
+        if post.get("clock_start") is not None:
+            from .postfx import _clock_time
+            try:
+                _clock_time(post["clock_start"], 0, fps)
+            except (ValueError, TypeError) as exc:
+                raise StudioError(str(exc)) from exc
+        for key, low, high in (("surveillance_fps", 1, fps), ("sensor_noise", 0, 30)):
+            value = post.get(key)
+            if value is not None and (type(value) is not int or not low <= value <= high):
+                raise StudioError(f"postproduction.{key} must be an integer {low}..{high}")
+    for flag in ("voice", "subtitles"):
+        if post.get(flag, "auto") not in ("auto", "on", "off"):
+            raise StudioError(f"postproduction.{flag} must be auto/on/off")
     used = set()
     for shot in shots:
         sid = shot.get("id")
@@ -55,6 +77,31 @@ def validate(project: dict) -> None:
         for field in ("scene", "action", "camera"):
             if not isinstance(shot.get(field), str) or not shot[field].strip():
                 raise StudioError(f"shot {sid}: missing {field}")
+        for field in ("cast", "subject_ids"):
+            members = shot.get(field, [])
+            if not isinstance(members, list) or any(not isinstance(m, str) or not m for m in members):
+                raise StudioError(f"shot {sid}: {field} must be a list of names")
+        acceptance = shot.get("acceptance", {})
+        if not isinstance(acceptance, dict) or any(k not in ACCEPTANCE_FIELDS for k in acceptance):
+            raise StudioError(f"shot {sid}: unsupported acceptance field")
+        for key, values in acceptance.items():
+            if not isinstance(values, list) or any(not isinstance(v, str) or not v.strip() for v in values):
+                raise StudioError(f"shot {sid}: acceptance.{key} must be nonempty strings")
+        for sound in shot.get("sound_events", []):
+            if not isinstance(sound, dict) or not isinstance(sound.get("path"), str) or not sound.get("path"):
+                raise StudioError(f"shot {sid}: sound_event must specify path")
+            t = sound.get("time")
+            if isinstance(t, bool) or not isinstance(t, (int, float)) or not 0 <= t < duration:
+                raise StudioError(f"shot {sid}: sound_event.time outside the shot")
+            gain = sound.get("gain", 1.0)
+            if isinstance(gain, bool) or not isinstance(gain, (int, float)) or not 0 <= gain <= 4:
+                raise StudioError(f"shot {sid}: invalid sound_event.gain")
+            raw = Path(sound["path"])
+            if raw.is_absolute() or ".." in raw.parts or raw.suffix.lower() not in AUDIO_EXTS:
+                raise StudioError(f"shot {sid}: sound_event must be a relative local audio file")
+        hold = shot.get("hold_tail_seconds", min(1.0, duration / 4))
+        if isinstance(hold, bool) or not isinstance(hold, (int, float)) or not 0 <= hold < duration:
+            raise StudioError(f"shot {sid}: invalid hold_tail_seconds")
         previous_end = 0.0
         for beat in shot.get("beats", []):
             start, end = beat.get("start"), beat.get("end")
@@ -85,40 +132,51 @@ def load_project(path: str | Path) -> tuple[Path, dict]:
 
 
 def shot_prompt(project: dict, shot: dict) -> str:
+    """Build a *scoped* prompt from shot-local subjects, never the whole cast.
+
+    A global identity describes appearance, not a permanent spatial state.
+    Action, position and departure belong to each specific shot.
+    """
     mode = project["mode"]
     ratio = project["aspect_ratio"]
     duration = shot["duration"]
-    chars = project.get("characters", {})
-    listed_chars = "\n".join(f"- {name}: {description}" for name, description in chars.items()) or "- 无人物表演"
-    materials = "、".join(shot.get("materials", [])) or "依照场景描述"
-    beats = "\n".join(
-        f"[{b['start']:05.2f}-{b['end']:05.2f}秒] {b['visual']}"
-        for b in shot.get("beats", [])
-    ) or f"[00.00-{duration:.2f}秒] {shot['action']}"
-    lines = "\n".join(
-        f"[{l['start']:.2f}-{l['end']:.2f}秒] 仅{l['speaker']}说：{l['text']}；其他人保持闭嘴。"
-        for l in shot.get("dialogue", [])
-    ) or "无人物台词，只保留真实环境音、材料摩擦声。"
+    cast = shot.get("cast", [])
+    people = project.get("characters", {})
+    identities = [f"- {name}: {people[name]}" for name in cast if name in people]
+    subjects = project.get("subjects", {})
+    identities.extend(f"- {name}: {subjects[name]}" for name in shot.get("subject_ids", []) if name in subjects)
+    listed = "\n".join(identities) if identities else "- 无需额外的全局身份词"
+    materials = "、".join(shot.get("materials", [])) or "以场景动作要求为准"
+    beats = "\n".join(f"[{b['start']:05.2f}-{b['end']:05.2f}秒] {b['visual']}"
+                      for b in shot.get("beats", [])) or f"[00.00-{duration:.2f}秒] {shot['action']}"
+    lines = "\n".join(f"[{l['start']:.2f}-{l['end']:.2f}秒] {l['speaker']}说：{l['text']}；其他在场角色不说话。"
+                      for l in shot.get("dialogue", [])) or "无台词，保留合适的现场环境声音。"
     constraints = (
-        "真实桌面手工制作纪录片。材料必须保留其真实物性、厚度、叶脉/纽扣孔洞和自然遮挡；"
-        "每一步必须由人的手和工具完成，不得凭空变形、自动出现、悬浮或跳过工序；"
-        "避免跨镜头工具/材料位置跳变。" if mode == "handcraft" else
-        "真人影视质感，角色外貌与服饰跨镜头保持一致；不超过三名主要演员，"
-        "避免复杂肢体交缠、混乱群戏和镜头外突然新增角色。"
+        "真实手工工艺：实际材料可辨，接触、固定、厚度和遮挡符合物理逻辑；"
+        "工序由人物或工具完成，不允许物体瞬间出现或自发运动。" if mode == "handcraft" else
+        "遵循真实空间、人物数量和可拍摄的动作顺序；跨镜头保持身份一致，但位置与姿态只由本镜动作规定。"
+        if mode == "story" else
+        "尊重主体外观与真实物理关系；根据本镜设定选择镜头运动和表演，不添加未授权主体。"
     )
+    acc = shot.get("acceptance", {})
+    acc_names = {"start_visible": "起始必须出现", "end_visible": "结束必须出现", "end_absent": "结束不得出现",
+                 "required_events": "必须发生的动作事件", "audio_checks": "待核实的声音事件"}
+    acceptance = "\n".join(f"- {acc_names[key]}：{'、'.join(acc[key])}" for key in acc_names if acc.get(key))
+    acceptance = acceptance or "- 依照本镜动作结尾验收；检查末尾关键帧。"
     return (
         f"# 镜头 {shot['id']}｜{shot['scene']}\n"
         f"画幅 {ratio}，时长 {duration} 秒，{project.get('style', '自然真实影视风格')}。\n"
         f"场景：{shot['scene']}。镜头：{shot['camera']}。\n"
         f"本镜目标/动作：{shot['action']}\n"
-        f"固定人物设定（跨镜头逐字沿用）：\n{listed_chars}\n"
-        f"真实材料：{materials}\n"
+        f"本镜出场人物和主体身份（身份描述不是永久站位指令）：\n{listed}\n"
+        f"材料/道具：{materials}\n"
         f"动作时间轴：\n{beats}\n"
-        f"台词和声音：\n{lines}\n"
+        f"台词：\n{lines}\n"
+        f"镜头验收目标：\n{acceptance}\n"
         f"制作约束：{constraints}\n"
-        "最后约 1 秒停止新动作，留下自然反应与剪辑余量。"
-        "无字幕、无水印、无时间码、无UI图层、无背景音乐。"
-        "镜头内部时间轴仅为生成指令，生成后需人工核查实际动作与音轨。\n"
+        f"结尾预留约 {shot.get('hold_tail_seconds', min(1.0, duration / 4)):g} 秒，自然结束动作并保持可验证的结束状态。"
+        "画面不直接生成字幕、水印、时间码、监控UI及其它文字（风格包装留到后期）。"
+        "动态镜头或固定机位以本镜 camera 为准。实际生成后必须依据视频验收目标人工检查。\n"
     )
 
 
@@ -153,6 +211,15 @@ def export(project_root: Path, project: dict) -> Path:
         rows.extend([f"## {shot['id']} · {shot['scene']}（{shot['duration']}秒）",
                      f"镜头：{shot['camera']}", f"动作：{shot['action']}", ""])
     (output / "storyboard.md").write_text("\n".join(rows), encoding="utf-8")
+    from .quality import audit_plan
+    write_json(output / "plan_audit.json", audit_plan(project))
+    review = output / "review"
+    review.mkdir(exist_ok=True)
+    from .quality import acceptance_checks
+    for shot in project["shots"]:
+        write_json(review / f"shot_{shot['id']}_criteria.json", {
+            "shot": shot["id"], "scene": shot["scene"],
+            "checks": acceptance_checks(shot), "human_verification_required": True})
     dialogues = lines_with_offsets(project)
     with (output / "voice_lines.csv").open("w", encoding="utf-8-sig", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=["id", "shot", "speaker", "text", "start", "end", "absolute_start", "absolute_end"])
@@ -257,9 +324,18 @@ def available_output(path: Path) -> Path:
         i += 1
 
 
-def render(root: Path, project: dict, output: Path | None = None, mix_voice: bool = False, burn_subtitles: bool = False) -> Path:
+def render(root: Path, project: dict, output: Path | None = None, mix_voice: bool | None = None, burn_subtitles: bool | None = None, shot_ids: list[str] | None = None) -> Path:
     ffmpeg = need_binary("ffmpeg")
+    selected_project = project if shot_ids is None else dict(project, shots=[s for s in project["shots"] if s["id"] in shot_ids])
+    if not selected_project["shots"]:
+        raise StudioError("No shots selected for render")
+    post = project.get("postproduction", {})
     index = asset_index(root)
+    voice_files = any(selected_asset(root, index, "voice", l["id"]) for l in lines_with_offsets(selected_project))
+    if mix_voice is None:
+        mix_voice = post.get("voice", "auto") == "on" or (post.get("voice", "auto") == "auto" and voice_files)
+    if burn_subtitles is None:
+        burn_subtitles = post.get("subtitles", "auto") == "on" or (post.get("subtitles", "auto") == "auto" and bool(lines_with_offsets(selected_project)))
     output = (output or root / "exports" / "final_master.mp4").expanduser().resolve()
     output.parent.mkdir(parents=True, exist_ok=True)
     output = available_output(output)
@@ -268,7 +344,12 @@ def render(root: Path, project: dict, output: Path | None = None, mix_voice: boo
     work = root / "work" / "cuts"
     work.mkdir(parents=True, exist_ok=True)
     pieces = []
-    for shot in project["shots"]:
+    elapsed = 0.0
+    source_offsets = {}
+    for original in project["shots"]:
+        source_offsets[original["id"]] = elapsed
+        elapsed += original["duration"]
+    for shot in selected_project["shots"]:
         src = selected_asset(root, index, "shots", shot["id"])
         if not src or not src.is_file():
             raise StudioError(f"Missing video for shot {shot['id']}; run ingest first")
@@ -279,10 +360,12 @@ def render(root: Path, project: dict, output: Path | None = None, mix_voice: boo
         duration = shot["duration"]
         dest = work / f"cut_{shot['id']}.mp4"
         # Scale to fit WITHOUT cropping or stretching original artwork.
+        from .postfx import style_filters
+        fx = style_filters(project, shot, width, height, fps, source_offsets[shot["id"]])
         video_filter = (f"[0:v]fps={fps},scale={width}:{height}:force_original_aspect_ratio=decrease:flags=lanczos,"
                         f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2,setsar=1,"
                         f"tpad=stop_mode=clone:stop_duration={duration},trim=duration={duration},"
-                        "setpts=PTS-STARTPTS,format=yuv420p[v]")
+                        "setpts=PTS-STARTPTS" + ("," + ",".join(fx) if fx else "") + ",format=yuv420p[v]")
         cmd = [ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-i", str(src)]
         ainput = "0:a:0"
         if not has_audio:
@@ -301,31 +384,46 @@ def render(root: Path, project: dict, output: Path | None = None, mix_voice: boo
     run([ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-f", "concat", "-safe", "0", "-i", str(listing),
          "-c", "copy", "-movflags", "+faststart", str(joined)])
     current = joined
-    if mix_voice:
-        voices = []
-        for line in lines_with_offsets(project):
-            file = selected_asset(root, index, "voice", line["id"])
-            if file and file.is_file():
-                voices.append((line, file))
-        if voices:
-            voiced = root / "work" / "voiced.mp4"
-            cmd = [ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-i", str(current)]
-            filter_parts = ["[0:a]volume=0.35[bed]"]
-            mix = ["[bed]"]
-            for i, (line, file) in enumerate(voices, start=1):
-                cmd += ["-i", str(file)]
-                delay = round(line["absolute_start"] * 1000)
-                filter_parts.append(f"[{i}:a]aresample=48000,adelay={delay}:all=1,volume=1.0[v{i}]")
-                mix.append(f"[v{i}]")
-            filter_parts.append("".join(mix) + f"amix=inputs={len(mix)}:duration=first:dropout_transition=0[a]")
-            cmd += ["-filter_complex", ";".join(filter_parts), "-map", "0:v", "-map", "[a]", "-c:v", "copy",
-                    "-c:a", "aac", "-b:a", "192k", str(voiced)]
-            run(cmd)
-            current = voiced
+    voices = []
+    for line in lines_with_offsets(selected_project):
+        file = selected_asset(root, index, "voice", line["id"])
+        if mix_voice and file and file.is_file():
+            voices.append((line["absolute_start"], file, 1.0))
+    effects = []
+    total_offset = 0.0
+    for shot in selected_project["shots"]:
+        for cue in shot.get("sound_events", []):
+            asset = (root / cue["path"]).resolve()
+            if not asset.is_relative_to(root.resolve()) or not asset.is_file():
+                raise StudioError(f"Missing or unsafe sound effect for shot {shot['id']}: {cue['path']}")
+            effects.append((total_offset + cue["time"], asset, float(cue.get("gain", 1.0))))
+        total_offset += shot["duration"]
+    if voices or effects:
+        voiced = root / "work" / "voiced.mp4"
+        cmd = [ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-i", str(current)]
+        bed_gain = float(post.get("original_audio_gain", 0.35 if voices else 1.0))
+        if not 0 <= bed_gain <= 2:
+            raise StudioError("postproduction.original_audio_gain must be 0..2")
+        filter_parts = [f"[0:a]volume={bed_gain}[bed]"]
+        mix = ["[bed]"]
+        for i, (when, asset, gain) in enumerate(voices + effects, start=1):
+            cmd += ["-i", str(asset)]
+            delay = round(when * 1000)
+            filter_parts.append(f"[{i}:a]aresample=48000,adelay={delay}:all=1,volume={gain}[a{i}]")
+            mix.append(f"[a{i}]")
+        filter_parts.append("".join(mix) + f"amix=inputs={len(mix)}:duration=first:dropout_transition=0[a]")
+        cmd += ["-filter_complex", ";".join(filter_parts), "-map", "0:v", "-map", "[a]", "-c:v", "copy",
+                "-c:a", "aac", "-b:a", "192k", str(voiced)]
+        run(cmd)
+        current = voiced
     if burn_subtitles:
-        if not lines_with_offsets(project):
+        captions = lines_with_offsets(selected_project)
+        if not captions:
             raise StudioError("No dialogue to burn; use captions only for projects with dialogue")
-        subtitle = export(root, project) / "subtitles.srt"
+        subtitle = root / "work" / "render_subtitles.srt"
+        subtitle.write_text("\n\n".join(
+            f"{n}\n{srt_time(d['absolute_start'])} --> {srt_time(d['absolute_end'])}\n{d['speaker']}：{d['text']}"
+            for n, d in enumerate(captions, start=1)) + "\n", encoding="utf-8")
         # FFmpeg subtitle filter interprets colons/backslashes specially, especially on Windows.
         safe_path = subtitle.as_posix().replace("\\", "/").replace(":", "\\:").replace("'", "\\'")
         run([ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-i", str(current),
@@ -337,8 +435,11 @@ def render(root: Path, project: dict, output: Path | None = None, mix_voice: boo
 
 
 def qa(root: Path, project: dict) -> dict:
+    from .quality import audit_plan
+    plan = audit_plan(project)
     index = asset_index(root)
-    checks = []
+    checks = list(plan["findings"])
+    voice_policy = project.get("postproduction", {}).get("voice", "auto")
     for shot in project["shots"]:
         src = selected_asset(root, index, "shots", shot["id"])
         if not src or not src.is_file():
@@ -347,18 +448,32 @@ def qa(root: Path, project: dict) -> dict:
         try:
             info = probe(src)
             duration = float(info.get("format", {}).get("duration", 0))
-            videos = [s for s in info.get("streams", []) if s.get("codec_type") == "video"]
+            videos = [stream for stream in info.get("streams", []) if stream.get("codec_type") == "video"]
             if not videos:
                 checks.append({"shot": shot["id"], "level": "ERROR", "message": "no video stream"})
             if duration < shot["duration"] - 0.2:
                 checks.append({"shot": shot["id"], "level": "WARN", "message": f"raw clip {duration:.2f}s shorter than target {shot['duration']}s; render will freeze-pad"})
-            if not any(s.get("codec_type") == "audio" for s in info.get("streams", [])):
-                checks.append({"shot": shot["id"], "level": "INFO", "message": "no audio stream; silent track will be generated"})
+            if not any(stream.get("codec_type") == "audio" for stream in info.get("streams", [])):
+                checks.append({"shot": shot["id"], "level": "INFO", "message": "no source audio; a silent track will be generated"})
         except (StudioError, subprocess.CalledProcessError, ValueError) as err:
             checks.append({"shot": shot["id"], "level": "ERROR", "message": str(err)})
+        for cue in shot.get("sound_events", []):
+            sound = (root / cue["path"]).resolve()
+            if not sound.is_relative_to(root.resolve()) or not sound.is_file():
+                checks.append({"shot": shot["id"], "level": "ERROR", "message": f"missing sound cue: {cue['path']}"})
     for line in lines_with_offsets(project):
-        if not selected_asset(root, index, "voice", line["id"]):
-            checks.append({"shot": line["shot"], "level": "INFO", "message": f"no replacement voice for {line['id']}"})
+        file = selected_asset(root, index, "voice", line["id"])
+        if not file:
+            checks.append({"shot": line["shot"], "level": "ERROR" if voice_policy == "on" else "WARN",
+                           "message": f"no replacement voice for {line['id']}; source speech may still be used"})
+        else:
+            try:
+                duration = float(probe(file).get("format", {}).get("duration", 0))
+                window = line["end"] - line["start"]
+                if duration > window + .15:
+                    checks.append({"shot": line["shot"], "level": "WARN", "message": f"voice {line['id']} {duration:.2f}s exceeds scheduled {window:.2f}s; manually retime speech/subtitles"})
+            except Exception:
+                checks.append({"shot": line["shot"], "level": "WARN", "message": f"cannot inspect audio timing for {line['id']}"})
     return {"project": project["title"], "checks": checks,
             "ready": not any(item["level"] == "ERROR" for item in checks),
-            "limitations": "Metadata-level QA only. Human review is required for faces, finger anatomy, physical process, sync, subtitle readability and sound."}
+            "limitations": "Metadata and planned-time QA only: actual events, lips, consonants, contact sync and visible end-state need human/vision verification."}

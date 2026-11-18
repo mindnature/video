@@ -19,14 +19,17 @@ def draft(idea: str, mode: str, title: str, count: int | None = None, provider: 
         raise StudioError("provider must be compatible or gemini")
     example = preset(mode, title)
     if count is None:
-        count = 6 if mode == "handcraft" else 5
+        count = 6 if mode == "handcraft" else 4 if mode == "general" else 5
     instructions = (
         "你是专业影视导演与视频模型制作技术总监。严格返回一个 JSON 对象，不要代码围栏。"
         "JSON 必须符合以下范例的字段结构（但创作全新内容）：" + json.dumps(example, ensure_ascii=False) + "。"
         f"必须生成 {count} 个镜头；mode={mode}，作品标题={title}。"
         "每个镜头必须包含 id, scene, action, camera, duration, materials, beats, dialogue。"
         "handcraft 时每镜10秒，9:16，明确真正可由手和工具完成的材料工序，不可跳步、瞬间变形或漂浮。"
-        "story 时每镜12秒，16:9，固定角色识别词，单个时间段仅一名角色讲话，最后留1.5秒无声。"
+        "story 时每镜12秒，16:9，保持人物身份一致，但不继承跨镜站位。general 采用创意驱动的通用构图。"
+        "每镜 cast 列出实际出场人物，subject_ids 列出需要的产品/物件；跨镜人物身份和动作状态分开。"
+        "建议每镜 acceptance 声明 start_visible/end_visible/end_absent/required_events/audio_checks 用于人工验收。"
+        "从用户请求提取 postproduction.style (clean/surveillance/vintage/cinematic) 和 voice/subtitles (auto/on/off)。"
         "beats 按时间递增不重叠，每个区间不得超过本镜时长；dialogue 每条须包含speaker,text,start,end。"
         "请用可执行的具体动作，而非空洞的形容词。"
     )

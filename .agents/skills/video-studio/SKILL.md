@@ -33,3 +33,13 @@ You are the user's production coordinator in Codex. The user should only need to
 - Human approval is required for each paid-generation budget, each candidate shot, and final master; do not approve on the user's behalf.
 - If browser download automation cannot find a new result tile, stop and use a user-visible manual download. Flow UI selectors and model settings are not stable APIs.
 - Do not upload the user's media to GitHub or another service beyond the explicitly requested Gemini and Flow workflows.
+
+## V1.2 Cross-genre production-quality checkpoint
+
+- Prefer `--preset general` for products and non-character-led videos. Do NOT treat any test story as a global filming rule.
+- Gemini must emit scoped `shot.cast` / `shot.subject_ids` and a concrete `acceptance` for each shot, while `characters`/`subjects` contain identities only.
+- `video-studio plan` writes `production/plan_audit.json`. Do not approve the storyboard while it contains ERROR findings, including permanent motion states in identity descriptions or contradictory end-state requirements.
+- Respect optional `postproduction.style` (`clean`, `surveillance`, `vintage`, `cinematic`) and `voice`/`subtitles` (`auto`, `on`, `off`). Surveillance UI must be visible in the FIRST clip handed to the user, not only in the final render.
+- When a candidate arrives, show the **actual** styled review clip and near-final frame. Ask the user whether the observable acceptance conditions and sound/subtitles are correct. Do not assume a file duration check proves the shot is correct.
+- After explicit review confirmation: `video-studio verify-shot PROJECT --shot NN --result pass --note "..."`, then `video-studio approve PROJECT --stage shot --shot NN`. Otherwise reject and keep all history.
+- Actual audio phoneme and on-screen contact sync requires manual inspection; software only compares planned timing and basic track lengths.
