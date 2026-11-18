@@ -1,67 +1,100 @@
-# Codex 一键制片 V1.0｜用户审核版
+# Video Studio V1.1｜双网页驱动：Codex + Gemini Chrome + Google Flow Chrome
 
-**一次口令启动，关键节点人工审核，任务失败可恢复。**
+**默认无需 Gemini API Key。** 用户通过专用 Chrome 分别登录 [Gemini](https://gemini.google.com/app) 与 [Google Flow](https://labs.google/fx/tools/flow)，Codex 负责自动提交分镜与镜头、素材管理、审核节点和 FFmpeg 后期。
 
-## 第一次准备（Windows + Codex）
+> 一键的含义：用一个 `start` 口令启动计划，之后在**分镜、Flow 额度、每镜头、最终成片**节点由用户审核。首次安装与两种网页的 UI 选择器校准不可省略。网页变更可能导致自动化停止；不能保证所有账号均可自动操作或下载。
 
-1. `git clone https://github.com/mindnature/video.git`，在 Codex 打开仓库，让 Codex 阅读 `.agents/skills/video-studio/SKILL.md`。
-2. 安装 Python 3.10+、FFmpeg、Google Chrome；在仓库执行 `python -m pip install -e '.[flow]'`，再运行 `video-studio doctor`。
-3. 在自己电脑的环境变量里设置 `GEMINI_API_KEY` 和 `GEMINI_MODEL`（必须是账号可调用的实际模型）。本项目不能直接把 Gemini 网页会员当作 API；不必把密钥提供给聊天机器人。
-4. 在 PowerShell 运行 `./scripts/open_flow_chrome.ps1`，在新开的**专用 Chrome** 登录 Google Flow，手工选择 Video、画幅、单次输出数量 x1、模型。不得开放本地 9222 调试端口。
-5. 复制 `examples/flow_ui.example.json` 至仓库外或者 `.gitignore` 保护的 `projects/flow-ui.local.json`。让 Codex 运行 `video-studio inspect-flow projects/电影名 --flow-config projects/flow-ui.local.json`，分析 `production/flow_browser/flow_screenshot.png` 和 `ui_probe.json`，然后填写经过实际页面验证的 CSS 输入框、生成按钮、结果卡片和下载按钮选择器。最后两项不配置时，会暂停改为人工下载；**不会假称已完成自动下载**。
-
-## 只说一句话启动（例）
-
-在 Codex 中说：
-
-> 使用 $video-studio 帮我制作 9:16、60 秒的东方手作纪录片。参考我的图片。Gemini 分析真实材料，规划六个 10 秒制作镜头；Google Flow 生成每段；我只负责审核。每完成一个镜头让我看预览，最后自动拼接为 MP4。
-
-Codex 的 CLI 步骤示例：
+## 1. 一次性安装（Windows）
 
 ```powershell
-video-studio start projects/flower --idea "真实花瓣逐步拼合为东方仕女" --reference "C:\Pictures\art.jpg" --title "东方花影" --preset handcraft --shots 6
-# 审核 Gemini 分镜：production/storyboard.md 和 production/prompts/*.txt
+git clone https://github.com/mindnature/video.git
+cd video
+python -m pip install -e '.[flow]'
+video-studio doctor
+./scripts/open_flow_chrome.ps1
+```
+
+另需安装 Python 3.10+、FFmpeg、Google Chrome。在启动的专用 Chrome 中**人工登录 Gemini 和 Google Flow**；不要交出账号密码，不要用有敏感资料的常用 Chrome 配置，不要开放 `127.0.0.1:9222` 调试端口。
+
+## 2. 首次校准两个网页
+
+为防止操作错误按钮，不预设未经验证的 CSS 选择器。在项目根目录执行：
+
+```powershell
+New-Item -ItemType Directory -Force projects | Out-Null
+Copy-Item examples/gemini_ui.example.json projects/gemini-ui.local.json
+Copy-Item examples/flow_ui.example.json projects/flow-ui.local.json
+video-studio inspect-gemini projects/flower --gemini-config projects/gemini-ui.local.json
+```
+
+让 Codex 查看 `projects/flower/production/gemini_browser/gemini_screenshot.png` 和 `ui_probe.json`，依据**真实界面**填入 Gemini 的 `prompt_selector`、`send_button_selector`、`response_selector`。若需要由自动化上传图片，填写 `reference_file_input_selector`；否则先在 Gemini 网页手动上传并确认 `manual_references_loaded: true`。如需每次新建会话，可配置 `new_chat_button_selector`。无网络权限、登录过期或 CSS 不稳定时，停下来让人校准；不要猜测按钮位置。
+
+运行 `video-studio start` 创建项目后，同样使用 `video-studio inspect-flow projects/flower --flow-config projects/flow-ui.local.json` 查看截图和选择器数量；配置 `prompt_selector`、`generate_button_selector`；可选配置结果卡片和下载选择器。Flow 自动提交之前会检查选择器与参考图片状态。`projects/` 被 Git 忽略，截图/选择器不上传 GitHub。
+
+## 3. 一句话启动
+
+```powershell
+video-studio start projects/flower --idea "用真实花瓣和叶片制作东方仕女手工画，六镜纪录片" --title "东方花影" --preset handcraft --shots 6 --reference "C:\Pictures\art.jpg" --gemini-config projects/gemini-ui.local.json
+```
+
+这一步只会通过 Gemini 网页生成分镜，**不会扣 Flow 视频生成额度**。成功输出 `production/storyboard.md` 和 `production/prompts/shot_*.txt`，然后停在 `awaiting_storyboard_approval`。有多个参考图可多次传入 `--reference`。
+
+人工审核分镜，不满意可编辑 `project.json` 并运行 `video-studio replan projects/flower`，满意才继续：
+
+```powershell
 video-studio approve projects/flower --stage storyboard
-# 人工检查 Flow 模型、比例、生成额度后批准本轮最多 6 次提交
+# 检查 Flow 账号、画幅、模型与预计消耗，明确同意最多提交 6 次
 video-studio approve projects/flower --stage credits --max-generations 6
-# 提交一镜，等待输出或人工下载
+# 每次最多提交一个镜头，随后暂停审核/下载
 video-studio advance projects/flower --flow-config projects/flow-ui.local.json
-# 如果没有自动下载，在 Flow 点下载后：
+```
+
+若自动下载失败，用户在 Flow 通过可见下载按钮保存真实视频，再运行：
+
+```powershell
 video-studio receive projects/flower --shot 01 --file "C:\Downloads\scene_01.mp4"
-# 浏览候选片段与 contact sheet，满意才批准
 video-studio approve projects/flower --stage shot --shot 01
-# Codex 自动重复 advance→用户选镜头→approve，直到生成 6 个镜头
-# 全部通过后 advance 自动合成 exports/final_master.mp4
-video-studio advance projects/flower --flow-config projects/flow-ui.local.json
+```
+
+继续执行 `advance → 审核 → approve shot`。全部镜头批准后，`advance` 自动 FFmpeg 合成 `exports/final_master.mp4`，观看后运行：
+
+```powershell
 video-studio approve projects/flower --stage final
 ```
 
-## 四处审核（必需）
+## 4. Gemini 页面异常如何恢复？
 
-- **分镜**：确认剧本、工序和机位。可以手工修改 `project.json`，执行 `replan` 后重新批准。
-- **额度**：明确本次最多允许几次 Flow 提交。重复生成需要再次授权，系统不自动猜额度。
-- **每镜头**：下载的原片必须可通过 ffprobe，人工判断人物/手部/物理工艺/衔接；不满意可以拒绝并重新授权生成。
-- **成片**：FFmpeg 自动拼接后完整观看，满意再标记完成。
-
-## 中断恢复
-
-执行 `video-studio status projects/flower` 查看当前阶段。再次执行对应命令即可继续。
-
-如果在 Flow 提交后网络出错，状态为 `generation_uncertain`，**先检查 Flow 是否实际生成**：
+`video-studio status projects/flower` 显示当前状态。如果 Gemini **尚未点击提交**（校准失败），会处于 `gemini_ready`，更新选择器后运行：
 
 ```powershell
-video-studio resolve projects/flower --shot 03 --action download
-video-studio receive projects/flower --shot 03 --file "C:\Downloads\shot_03.mp4"
+video-studio advance projects/flower --gemini-config projects/gemini-ui.local.json
 ```
 
-确认没有可用片段，才可以用 `--action retry`，并明确重新授权额度。已经完成的视频和旧版本全部保留，不会重做之前审核通过的镜头。
+如果**可能已提交**但页面超时/回复不是合法 JSON，状态为 `gemini_submission_uncertain`。先在 Gemini 页面检查实际回复。可将网页完整 JSON 正文另存为本地 `storyboard.json`，手动导入而不重发：
 
-## 已经实现的范围与边界
+```powershell
+video-studio receive-gemini projects/flower --file "C:\Downloads\storyboard.json"
+```
 
-- ✅ Gemini API 可接收创意及 JPG/PNG/WebP 参考图，生成分镜 JSON、镜头提示词。
-- ✅ Codex Skill 能驱动项目状态推进、审核暂停、素材版本归档、音频与后期处理。
-- ✅ Playwright 通过专用已登录 Chrome 的本地 CDP，按用户确认的 DOM 选择器逐镜提交；支持识别新结果卡片并尝试以网站正常下载动作保存视频。
-- ✅ 自动验证下载视频流，生成预览接触表，FFmpeg 合成，并需人工最终审片。
-- ⚠️ Flow 是动态网页，**浏览器选择器和下载机制需要用户实际登录后校准**；无当前账号会话无法承诺全链路自动下载成功。
-- ⚠️ Gemini API 可能按量计费，Flow 生成消耗对应账号额度。没有使用任何非公开 Google API、绕过登录或机器人检测的方法。
-- ⚠️ 语音克隆、Whisper 词级对齐、自动检测材料失真尚未作为本阶段的全自动功能交付。Google Flow 影片生成的可选时长以当前页面为准。
+只有确认需要重新提交，才能**人工明确批准**：
+
+```powershell
+video-studio resolve-gemini projects/flower --action retry
+video-studio advance projects/flower --gemini-config projects/gemini-ui.local.json
+```
+
+Flow 提交后若不确定是否扣费，不得自动重试：检查 Flow，再使用 `resolve --shot ... --action download`，或用户确认后 `retry`。所有原片版本保留。
+
+## 5. 备用模式
+
+- **Gemini API**：`video-studio start ... --provider gemini`；需要 `GEMINI_API_KEY` 与 `GEMINI_MODEL`，这是可选通道，非默认。
+- **纯离线模板**：`video-studio start ... --provider template`；无需 Gemini，但只输出通用分镜，需手工修订。
+- **原有手动流程**：`init` / `plan` / `flow-pack` / `ingest` / `render` 仍可使用。
+
+## 6. 已实现与仍待实测的边界
+
+- 已实现：本地 Chrome CDP Gemini 网页填写、发送、读取可见回复、JSON 严格校验、独立人工审核、出错后可恢复；Flow 尝试提交、可见菜单下载、视频归档/接触表、FFmpeg 合成。
+- 仍需在你真实账号验证：Gemini 和 Flow 的网页选择器、Gemini 图片上传控件、Flow 结果下载结构、账号额度和可选生成时长。网站版并非稳定 API，官方未保证第三方 DOM 自动化兼容。
+- 已登录 Chrome 不等于无限授权或可跳过 Google 登录验证；所有额度操作需要明确预算审批。项目不读取 Cookie，不调用非公开网站接口，不绕过验证码、风控或付费要求。
+
+**成功判定**：只有实际下载的镜头媒体通过 ffprobe、用户逐镜审核、完整合成并最终批准后，才能声称视频已完成。

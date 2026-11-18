@@ -63,7 +63,9 @@ def parser() -> argparse.ArgumentParser:
     a.add_argument("--preset", choices=["handcraft", "story"], default="handcraft")
     a.add_argument("--title", default="未命名作品")
     a.add_argument("--shots", type=int, default=0)
-    a.add_argument("--provider", choices=["gemini", "template"], default="gemini")
+    a.add_argument("--provider", choices=["gemini-web", "gemini", "template"], default="gemini-web",
+                   help="Chrome Gemini by default; API and template optional")
+    a.add_argument("--gemini-config", type=Path, help="local verified Gemini web CSS selectors")
     status = sub.add_parser("status", help="show saved workflow and exact next action")
     status.add_argument("project")
     app = sub.add_parser("approve", help="human review gate: storyboard, credits, shot, final")
@@ -74,6 +76,7 @@ def parser() -> argparse.ArgumentParser:
     adv = sub.add_parser("advance", help="run one Flow generation or produce final render; resumable")
     adv.add_argument("project")
     adv.add_argument("--flow-config", type=Path, help="local verified Playwright CSS selectors JSON")
+    adv.add_argument("--gemini-config", type=Path, help="local verified Gemini UI selectors JSON for pending Gemini plan")
     recv = sub.add_parser("receive", help="import browser-downloaded clip and pause for human review")
     recv.add_argument("project")
     recv.add_argument("--shot", required=True)
@@ -91,6 +94,15 @@ def parser() -> argparse.ArgumentParser:
     inspect = sub.add_parser("inspect-flow", help="save local screenshot and CSS selector counts for Flow UI")
     inspect.add_argument("project")
     inspect.add_argument("--flow-config", type=Path)
+    gem_inspect = sub.add_parser("inspect-gemini", help="Gemini visible UI screenshot and selector counts")
+    gem_inspect.add_argument("project")
+    gem_inspect.add_argument("--gemini-config", type=Path)
+    gem_receive = sub.add_parser("receive-gemini", help="recover checked storyboard JSON from Gemini web response")
+    gem_receive.add_argument("project")
+    gem_receive.add_argument("--file", type=Path, required=True)
+    gem_resolve = sub.add_parser("resolve-gemini", help="operator authorizes retry after inspecting uncertain Gemini chat")
+    gem_resolve.add_argument("project")
+    gem_resolve.add_argument("--action", choices=["retry"], required=True)
     sub.add_parser("doctor", help="check local FFmpeg and browser adapter requirements")
     return p
 
@@ -142,7 +154,7 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "start":
             count = args.shots or (6 if args.preset == "handcraft" else 5)
             state = production.start(Path(args.name), args.idea, args.preset, args.title, count,
-                                     args.reference, args.provider)
+                                     args.reference, args.provider, gemini_config=args.gemini_config)
             print(production.summary(state))
         elif args.command == "status":
             print(production.summary(production.get_state(Path(args.project).resolve())))
@@ -151,7 +163,7 @@ def main(argv: list[str] | None = None) -> int:
             print(production.summary(state))
         elif args.command == "advance":
             # Pass the config so the browser can adapt to the user's actual Flow UI.
-            state = production.advance(Path(args.project), config=args.flow_config)
+            state = production.advance(Path(args.project), config=args.gemini_config or args.flow_config)
             print(production.summary(state))
         elif args.command == "receive":
             state = production.receive(Path(args.project), args.shot, args.file)
@@ -169,6 +181,16 @@ def main(argv: list[str] | None = None) -> int:
             from .flow_browser import FlowBrowser
             output = FlowBrowser(args.flow_config).inspect(Path(args.project).resolve())
             print(f"Flow UI probe saved locally: {output}")
+        elif args.command == "inspect-gemini":
+            from .gemini_browser import GeminiBrowser
+            output = GeminiBrowser(args.gemini_config).inspect(Path(args.project).resolve())
+            print(f"Gemini UI probe saved locally: {output}")
+        elif args.command == "receive-gemini":
+            state = production.receive_gemini(Path(args.project), args.file)
+            print(production.summary(state))
+        elif args.command == "resolve-gemini":
+            state = production.resolve_gemini(Path(args.project), args.action)
+            print(production.summary(state))
         elif args.command == "doctor":
             for name in ["ffmpeg", "ffprobe"]:
                 print(f"{name}: {shutil.which(name) or 'MISSING'}")
@@ -177,7 +199,7 @@ def main(argv: list[str] | None = None) -> int:
                 print("playwright: installed")
             except ImportError:
                 print("playwright: optional; install .[flow] for flow-assist")
-            print("LLM: optional; use --provider gemini with GEMINI_API_KEY and GEMINI_MODEL, or set VIDEO_LLM_* for compatible")
+            print("Gemini: default Chrome web login, no API key; configure local UI selectors. Gemini API is an optional fallback.")
         return 0
     except (StudioError, OSError, ValueError) as error:
         print(f"Error: {error}", file=sys.stderr)

@@ -46,7 +46,8 @@ def event(state: dict, kind: str, **detail: Any) -> None:
 
 
 def start(root: Path, idea: str, mode: str, title: str, shots: int,
-          reference_files: list[Path] | None = None, provider: str = "gemini") -> dict:
+          reference_files: list[Path] | None = None, provider: str = "gemini-web",
+          gemini_config: Path | None = None, gemini_browser=None) -> dict:
     """Generate a Gemini shot plan then stop at first human review gate."""
     root = root.expanduser().resolve()
     if state_file(root).exists() or (root / "project.json").exists():
@@ -59,12 +60,15 @@ def start(root: Path, idea: str, mode: str, title: str, shots: int,
             raise StudioError(f"Reference must be an existing JPG/PNG/WebP: {image}")
     if provider == "gemini":
         project = draft(idea, mode, title, shots, provider="gemini", images=references)
+    elif provider == "gemini-web":
+        # Placeholder only; storyboard is NOT approved until validated Gemini web response.
+        project = preset(mode, title)
     elif provider == "template":
         project = preset(mode, title)
         if len(project["shots"]) != shots:
             raise StudioError("Template only supports preset shot count; choose 6 for handcraft or 5 for story")
     else:
-        raise StudioError("provider must be gemini or template")
+        raise StudioError("provider must be gemini-web, gemini or template")
     # Do not start a browser or consume Flow credits here.
     root.mkdir(parents=True, exist_ok=True)
     write_json(root / "project.json", project)
@@ -74,15 +78,95 @@ def start(root: Path, idea: str, mode: str, title: str, shots: int,
         dest.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(original, dest)
         saved_refs.append(dest.relative_to(root).as_posix())
-    export(root, project)
-    flow_pack(root, project)
-    gemini_brief(root, project, idea)
-    state = {"schema": 1, "title": project["title"], "phase": "awaiting_storyboard_approval",
+    if provider != "gemini-web":
+        export(root, project)
+        flow_pack(root, project)
+        gemini_brief(root, project, idea)
+    state = {"schema": 2, "title": project["title"],
+             "phase": "gemini_ready" if provider == "gemini-web" else "awaiting_storyboard_approval",
              "idea": idea, "provider": provider, "references": saved_refs,
+             "requested_mode": mode, "requested_shots": shots, "gemini_attempts": 0,
              "approved_plan_digest": None, "credits_remaining": 0,
              "shots": {shot["id"]: {"status": "pending", "attempts": 0, "candidates": [], "approved_file": None}
                        for shot in project["shots"]}, "events": []}
     event(state, "created", provider=provider)
+    save_state(root, state)
+    if provider == "gemini-web":
+        # One command starts the browser operation. Preflight errors leave an
+        # untouched gemini_ready state; submissions become uncertain on timeout.
+        return generate_gemini(root, browser=gemini_browser, config=gemini_config)
+    return state
+
+
+def _accept_gemini_plan(root: Path, state: dict, project: dict) -> dict:
+    from .core import validate
+    validate(project)
+    if project["mode"] != state["requested_mode"] or len(project["shots"]) != state["requested_shots"]:
+        raise StudioError("Gemini storyboard does not match requested mode or shot count")
+    # Save validated JSON, then export files. A crashed handoff remains in
+    # gemini_submission_uncertain; never automatically submit another prompt.
+    write_json(root / "project.json", project)
+    export(root, project)
+    flow_pack(root, project)
+    gemini_brief(root, project, state["idea"])
+    state["title"] = project["title"]
+    state["shots"] = {shot["id"]: {"status": "pending", "attempts": 0,
+                        "candidates": [], "approved_file": None} for shot in project["shots"]}
+    state["phase"] = "awaiting_storyboard_approval"
+    event(state, "received_gemini_storyboard", shots=len(project["shots"]))
+    save_state(root, state)
+    return state
+
+
+def generate_gemini(root: Path, browser=None, config: Path | None = None) -> dict:
+    """One Gemini chat submission max; if response unclear never auto retry."""
+    root = Path(root).expanduser().resolve()
+    state = get_state(root)
+    if state["provider"] != "gemini-web" or state["phase"] != "gemini_ready":
+        raise StudioError("Gemini web submission not authorized in current phase")
+    if browser is None:
+        from .gemini_browser import GeminiBrowser
+        browser = GeminiBrowser(config)
+    references = [root / path for path in state["references"]]
+    # All non-mutating checks happen before reserving the attempt.
+    browser.preflight(references)
+    state["gemini_attempts"] += 1
+    state["phase"] = "gemini_submission_uncertain"
+    event(state, "gemini_submission_reserved", attempt=state["gemini_attempts"])
+    save_state(root, state)
+    try:
+        result = browser.generate_plan(state["idea"], state["requested_mode"], state["title"],
+                                       state["requested_shots"], references)
+        return _accept_gemini_plan(root, state, result)
+    except Exception as exc:
+        event(state, "gemini_error", error=f"{type(exc).__name__}: {str(exc)[:300]}")
+        save_state(root, state)
+        raise StudioError("Gemini web submission uncertain: inspect Gemini chat before retrying. "
+                          "Use receive-gemini for a valid saved JSON, or resolve-gemini --action retry "
+                          "after explicit human confirmation. " + str(exc)) from exc
+
+
+def receive_gemini(root: Path, response_file: Path) -> dict:
+    """Manually recover valid Gemini JSON from a visible web response."""
+    root = Path(root).expanduser().resolve()
+    state = get_state(root)
+    if state["provider"] != "gemini-web" or state["phase"] not in ("gemini_ready", "gemini_submission_uncertain"):
+        raise StudioError("Not expecting a Gemini web response")
+    from .gemini_browser import extract_project
+    text = Path(response_file).expanduser().resolve().read_text(encoding="utf-8")
+    project = extract_project(text, state["requested_mode"], state["requested_shots"])
+    return _accept_gemini_plan(root, state, project)
+
+
+def resolve_gemini(root: Path, action: str) -> dict:
+    root = Path(root).expanduser().resolve()
+    state = get_state(root)
+    if state["provider"] != "gemini-web" or state["phase"] != "gemini_submission_uncertain":
+        raise StudioError("No uncertain Gemini submission to resolve")
+    if action != "retry":
+        raise StudioError("Only explicit retry is allowed; use receive-gemini for manual recovery")
+    state["phase"] = "gemini_ready"
+    event(state, "gemini_retry_authorized_by_operator")
     save_state(root, state)
     return state
 
@@ -263,6 +347,8 @@ def advance(root: Path, browser=None, config: Path | None = None) -> dict:
     """
     root, project = load_project(root)
     state = get_state(root)
+    if state["phase"] == "gemini_ready":
+        return generate_gemini(root, config=config)
     assert_plan_unchanged(root, state)
     if state["phase"] != "ready_to_generate":
         raise StudioError(f"Paused: {state['phase']}. Check status and complete the human review gate.")
@@ -326,6 +412,8 @@ def advance(root: Path, browser=None, config: Path | None = None) -> dict:
 def summary(state: dict) -> str:
     phase = state["phase"]
     instructions = {
+        "gemini_ready": "Gemini web is ready: run advance (after verifying UI config).",
+        "gemini_submission_uncertain": "Inspect Gemini chat, then receive-gemini PROJECT --file JSON, or explicitly resolve-gemini --action retry. No automatic retry.",
         "awaiting_storyboard_approval": "Review production/storyboard.md, prompts, project.json; then approve --stage storyboard (or edit and replan).",
         "awaiting_credit_approval": "Verify your logged-in Flow session, model, aspect, costs and selectors, then approve --stage credits --max-generations N.",
         "ready_to_generate": "Run advance to generate one pending shot (or render if all approved).",
@@ -336,7 +424,8 @@ def summary(state: dict) -> str:
         "awaiting_final_approval": "Watch exports/final_master*.mp4, then approve --stage final.",
         "completed": "Completed. All assets and historical versions were retained.",
     }
-    rows = [f"Phase: {phase}", f"Credits authorized but unattempted: {state['credits_remaining']}", "Shots:"]
+    rows = [f"Phase: {phase}", f"Director: {state.get('provider', 'unknown')}",
+            f"Credits authorized but unattempted: {state['credits_remaining']}", "Shots:"]
     rows += [f"  {sid}: {item['status']}, attempts={item['attempts']}, approved={item.get('approved_file') or '-'}"
              for sid, item in state["shots"].items()]
     rows.append("Next: " + instructions.get(phase, "Inspect run_state.json"))

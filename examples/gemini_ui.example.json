@@ -1,0 +1,11 @@
+{
+  "cdp_url": "http://127.0.0.1:9222",
+  "prompt_selector": "",
+  "send_button_selector": "",
+  "response_selector": "",
+  "new_chat_button_selector": "",
+  "reference_file_input_selector": "",
+  "manual_references_loaded": false,
+  "response_timeout_seconds": 240,
+  "stable_polls": 4
+}
