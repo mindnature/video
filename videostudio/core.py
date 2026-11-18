@@ -214,6 +214,11 @@ def selected_asset(root: Path, index: dict, category: str, key: str) -> Path | N
     versions = index.get(category, {}).get(key, [])
     if not versions:
         return None
+    selection_file = root / "assets" / "selection.json"
+    if selection_file.is_file():
+        selection = read_json(selection_file).get(category, {}).get(key)
+        if selection and selection in {v["path"] for v in versions}:
+            return root / selection
     return root / versions[-1]["path"]
 
 

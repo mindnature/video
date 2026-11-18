@@ -1,0 +1,11 @@
+{
+  "cdp_url": "http://127.0.0.1:9222",
+  "prompt_selector": "",
+  "generate_button_selector": "",
+  "reference_file_input_selector": "",
+  "result_tile_selector": "",
+  "result_download_selector": "",
+  "download_menu_option_selector": "",
+  "generation_timeout_seconds": 900,
+  "manual_references_loaded": false
+}

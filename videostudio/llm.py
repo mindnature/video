@@ -1,8 +1,11 @@
 """Optional OpenAI-compatible LLM draft creation; never used without explicit command."""
 from __future__ import annotations
 
+import base64
 import json
+import mimetypes
 import os
+from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 from urllib.parse import quote
@@ -11,7 +14,7 @@ from .core import StudioError, validate
 from .templates import preset
 
 
-def draft(idea: str, mode: str, title: str, count: int | None = None, provider: str = "compatible") -> dict:
+def draft(idea: str, mode: str, title: str, count: int | None = None, provider: str = "compatible", images: list[Path] | None = None) -> dict:
     if provider not in ("compatible", "gemini"):
         raise StudioError("provider must be compatible or gemini")
     example = preset(mode, title)
@@ -33,11 +36,23 @@ def draft(idea: str, mode: str, title: str, count: int | None = None, provider: 
         if not key or not model:
             raise StudioError("Set GEMINI_API_KEY and GEMINI_MODEL for --provider gemini; the model must be available to your account")
         url = "https://generativelanguage.googleapis.com/v1beta/models/" + quote(model, safe="") + ":generateContent"
+        parts = [{"text": idea}]
+        for image in images or []:
+            image = Path(image)
+            if image.stat().st_size > 12 * 1024 * 1024:
+                raise StudioError(f"Image too large (>12MB): {image.name}; resize before calling Gemini")
+            mime, _ = mimetypes.guess_type(image.name)
+            if mime not in ("image/jpeg", "image/png", "image/webp"):
+                raise StudioError(f"Unsupported reference image type: {image.suffix}")
+            parts.append({"inline_data": {"mime_type": mime,
+                                          "data": base64.b64encode(image.read_bytes()).decode("ascii")}})
         payload = {"systemInstruction": {"parts": [{"text": instructions}]},
-                   "contents": [{"role": "user", "parts": [{"text": idea}]}],
+                   "contents": [{"role": "user", "parts": parts}],
                    "generationConfig": {"responseMimeType": "application/json", "temperature": 0.5}}
         headers = {"x-goog-api-key": key, "Content-Type": "application/json"}
     else:
+        if images:
+            raise StudioError("Image references are supported only by --provider gemini")
         base = os.getenv("VIDEO_LLM_BASE_URL", "").rstrip("/")
         key = os.getenv("VIDEO_LLM_API_KEY", "")
         model = os.getenv("VIDEO_LLM_MODEL", "")

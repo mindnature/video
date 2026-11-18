@@ -27,3 +27,7 @@ Fix appearance in `characters` and carry verbatim across shots. One speaker at a
 - Use `gemini-brief` for Gemini web/Antigravity sessions (no key needed) or `draft --provider gemini` with `GEMINI_API_KEY`/`GEMINI_MODEL` when an API call is authorized. Validate and review resulting project.json.
 - Run `flow-pack` to create `flow_agent_handoff.md`, individual prompts and `flow_queue.json`. Flow Agent can generate multiple variations, but independent multi-scene batching is not guaranteed; fall back to shot-by-shot generation.
 - Never report Flow rendering/download success until actual media files have been ingested. Credits may be spent; retain confirmation before each paid generation.
+
+## V1.0 checkpointed production
+
+When the user asks for "one-click" production, read `.agents/skills/video-studio/SKILL.md` and `docs/ONE_CLICK.md` and drive `start → approve storyboard → approve credits → advance → receive/approve shot → advance ... → approve final`. NEVER approve stages without the human's explicit assent. Gemini API requires the user's credential; use the normal visible Google Flow browser, not private endpoints. Browser automation must be calibrated against the real account UI; when uncertain, STOP, preserve assets and inspect status instead of automatically re-submitting a potentially billed generation. Never claim that a browser generation/download was verified only because simulated tests passed.

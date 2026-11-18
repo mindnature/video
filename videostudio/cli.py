@@ -11,6 +11,7 @@ from . import __version__
 from .core import StudioError, export, ingest, load_project, qa, render, write_json
 from .llm import draft
 from .handoff import gemini_brief, flow_pack
+from . import production
 from .templates import preset
 
 
@@ -55,6 +56,41 @@ def parser() -> argparse.ArgumentParser:
     flow.add_argument("--selector", help="verified CSS textbox selector")
     flow.add_argument("--button", help="verified CSS submit button selector")
     flow.add_argument("--submit", action="store_true", help="explicitly click generation after filling")
+    a = sub.add_parser("start", help="one command: idea + reference images -> Gemini storyboard -> review gate")
+    a.add_argument("name", help="new project directory")
+    a.add_argument("--idea", required=True)
+    a.add_argument("--reference", type=Path, action="append", default=[], help="reference image; repeat as needed")
+    a.add_argument("--preset", choices=["handcraft", "story"], default="handcraft")
+    a.add_argument("--title", default="未命名作品")
+    a.add_argument("--shots", type=int, default=0)
+    a.add_argument("--provider", choices=["gemini", "template"], default="gemini")
+    status = sub.add_parser("status", help="show saved workflow and exact next action")
+    status.add_argument("project")
+    app = sub.add_parser("approve", help="human review gate: storyboard, credits, shot, final")
+    app.add_argument("project")
+    app.add_argument("--stage", choices=["storyboard", "credits", "shot", "final"], required=True)
+    app.add_argument("--shot")
+    app.add_argument("--max-generations", type=int)
+    adv = sub.add_parser("advance", help="run one Flow generation or produce final render; resumable")
+    adv.add_argument("project")
+    adv.add_argument("--flow-config", type=Path, help="local verified Playwright CSS selectors JSON")
+    recv = sub.add_parser("receive", help="import browser-downloaded clip and pause for human review")
+    recv.add_argument("project")
+    recv.add_argument("--shot", required=True)
+    recv.add_argument("--file", required=True, type=Path)
+    rej = sub.add_parser("reject", help="reject a candidate, keep original, require authorized retry")
+    rej.add_argument("project")
+    rej.add_argument("--shot", required=True)
+    rej.add_argument("--reason", required=True)
+    resol = sub.add_parser("resolve", help="recover ambiguous Flow submission without automatic retry")
+    resol.add_argument("project")
+    resol.add_argument("--shot", required=True)
+    resol.add_argument("--action", choices=["download", "retry"], default="download")
+    repl = sub.add_parser("replan", help="revalidate edited project.json before first Flow submission")
+    repl.add_argument("project")
+    inspect = sub.add_parser("inspect-flow", help="save local screenshot and CSS selector counts for Flow UI")
+    inspect.add_argument("project")
+    inspect.add_argument("--flow-config", type=Path)
     sub.add_parser("doctor", help="check local FFmpeg and browser adapter requirements")
     return p
 
@@ -103,6 +139,36 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "flow-assist":
             from .flow import assist
             assist(args.prompt, args.selector, args.button, args.submit)
+        elif args.command == "start":
+            count = args.shots or (6 if args.preset == "handcraft" else 5)
+            state = production.start(Path(args.name), args.idea, args.preset, args.title, count,
+                                     args.reference, args.provider)
+            print(production.summary(state))
+        elif args.command == "status":
+            print(production.summary(production.get_state(Path(args.project).resolve())))
+        elif args.command == "approve":
+            state = production.approve(Path(args.project), args.stage, args.shot, args.max_generations)
+            print(production.summary(state))
+        elif args.command == "advance":
+            # Pass the config so the browser can adapt to the user's actual Flow UI.
+            state = production.advance(Path(args.project), config=args.flow_config)
+            print(production.summary(state))
+        elif args.command == "receive":
+            state = production.receive(Path(args.project), args.shot, args.file)
+            print(production.summary(state))
+        elif args.command == "reject":
+            state = production.reject_shot(Path(args.project), args.shot, args.reason)
+            print(production.summary(state))
+        elif args.command == "resolve":
+            state = production.resolve_uncertain(Path(args.project), args.shot, args.action)
+            print(production.summary(state))
+        elif args.command == "replan":
+            state = production.replan(Path(args.project))
+            print(production.summary(state))
+        elif args.command == "inspect-flow":
+            from .flow_browser import FlowBrowser
+            output = FlowBrowser(args.flow_config).inspect(Path(args.project).resolve())
+            print(f"Flow UI probe saved locally: {output}")
         elif args.command == "doctor":
             for name in ["ffmpeg", "ffprobe"]:
                 print(f"{name}: {shutil.which(name) or 'MISSING'}")
