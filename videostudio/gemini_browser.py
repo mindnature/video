@@ -158,11 +158,11 @@ class GeminiBrowser:
             })
         return output / "ui_probe.json"
 
-    def generate_plan(self, idea: str, mode: str, title: str, shots: int, references: list[Path]) -> dict:
-        """Send a SINGLE web chat turn, then parse the most recent visible assistant reply.
+    def _send_prompt(self, prompt_text: str, references: list[Path]) -> str:
+        """Submit one user-visible Gemini turn and read the final stable visible reply.
 
-        Caller persists 'submission_uncertain' before calling this method. Any timeout or
-        invalid JSON must be resolved by operator; this method never retries.
+        This does not retry or query private network endpoints. The caller marks
+        submission-uncertain before invoking, preserving operator approval.
         """
         try:
             from playwright.sync_api import sync_playwright
@@ -179,7 +179,7 @@ class GeminiBrowser:
             locator = page.locator(cfg["response_selector"])
             original_count = locator.count()
             original_text = locator.last.inner_text(timeout=5000) if original_count else ""
-            one(page, cfg["prompt_selector"], "prompt").fill(director_prompt(idea, mode, title, shots, len(references)))
+            one(page, cfg["prompt_selector"], "prompt").fill(prompt_text)
             one(page, cfg["send_button_selector"], "send").click(timeout=15000)
             deadline = time.monotonic() + cfg["response_timeout_seconds"]
             previous = ""
@@ -197,5 +197,29 @@ class GeminiBrowser:
                 else:
                     previous, unchanged = current, 0
                 if unchanged >= cfg["stable_polls"]:
-                    return extract_project(current, mode, shots)
-            raise StudioError("Gemini visible response did not stabilize in time; check the page before retrying")
+                    return current
+            raise StudioError("Gemini visible response did not stabilize; inspect page before retrying")
+
+    def generate_story(self, idea: str, mode: str, title: str, shots: int, references: list[Path]) -> dict:
+        from .narrative import story_prompt, parse_story_response
+        return parse_story_response(self._send_prompt(story_prompt(idea, mode, title, shots), references))
+
+    def generate_plan_from_story(self, idea: str, mode: str, title: str, shots: int,
+                                 references: list[Path], approved_story: dict) -> dict:
+        from .narrative import storyboard_prompt
+        result = extract_project(self._send_prompt(storyboard_prompt(idea, mode, title, shots, approved_story,
+                                                                      len(references)), references), mode, shots)
+        # The final plan must contain the exact approved story, not a rewritten one.
+        from .core import digest
+        if result.get("story_bible") != approved_story or result.get("continuity_required") is not True:
+            raise StudioError("Gemini storyboard changed approved story or omitted continuity_required")
+        return result
+
+    def review_plan(self, project: dict) -> dict:
+        """Independent director reviewer in a separate Gemini browser turn."""
+        from .narrative import director_review_prompt, parse_director_review
+        return parse_director_review(self._send_prompt(director_review_prompt(project), []))
+
+    def generate_plan(self, idea: str, mode: str, title: str, shots: int, references: list[Path]) -> dict:
+        """Legacy V1.2 one-call path; V1.3 CLI uses two-stage director by default."""
+        return extract_project(self._send_prompt(director_prompt(idea, mode, title, shots, len(references)), references), mode, shots)

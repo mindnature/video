@@ -1,8 +1,8 @@
-# Video Studio V1.2 — 通用 AI 制片质量闭环（Codex + Gemini + Flow + 人工审核）
+# Video Studio V1.3 — 剧本优先 · 连续性导演 · 可审核剪辑（Codex + Gemini + Flow）
 
-**一句创意 / 一张参考图 → Gemini 分镜 → 人工审核 → Google Flow 浏览器逐镜生成 → 镜头审核 → FFmpeg 合成 → 成片审核。**
+**一句创意/参考图 → Gemini 故事圣经 → 人审 → Gemini 分镜 → 独立导演复核 → 人审 → Flow 逐镜生成 → 单镜及相邻镜头联审 → FFmpeg 按实际入出点剪辑 → 成片审核。**
 
-[**中文操作说明：docs/ONE_CLICK.md**](docs/ONE_CLICK.md) · [Codex Skill](.agents/skills/video-studio/SKILL.md)
+[**V1.3 导演流程：docs/DIRECTOR_V13.md**](docs/DIRECTOR_V13.md) · [入门：docs/ONE_CLICK.md](docs/ONE_CLICK.md) · [Codex Skill](.agents/skills/video-studio/SKILL.md)
 
 > 这是本地优先、可恢复的自动制片工作流。**一键表示只需要在 Codex 发起制作，审核节点仍由人决定**，不是绕过网站登录、付费额度或无需人工审核的无人值守服务。默认仅需 Chrome 中登录 Gemini 与 Google Flow，不需要 Gemini API Key；首次需校准两个网站的选择器。没有实时登录的 Flow 页面无法事先验证这些选择器是否仍适用。
 
@@ -26,27 +26,35 @@ video-studio doctor
 
 还需单独安装 Python 3.10+、FFmpeg、Google Chrome，无需默认设置 API Key。专用 Chrome 打开后，登录 Gemini 和 Google Flow，选择 Video 模式及合适模型/画幅。配置 Gemini 与 Flow 选择器详见 [中文操作说明](docs/ONE_CLICK.md)。
 
-## 常用命令
+## 常用命令（V1.3 默认 Gemini 网页）
 
 ```powershell
-# 默认 Gemini 网页通过已登录 Chrome 自动生成六镜头分镜（不扣 Flow 额度）
-video-studio start projects/flower --idea "真实花瓣做东方仕女手工画" --title "东方花影" --reference "C:\Pictures\art.jpg" --gemini-config projects/gemini-ui.local.json
-video-studio status projects/flower
+# 1. Gemini 先输出故事圣经；此时还没有提交 Flow
+video-studio start projects/film --idea "一场有因果与情绪变化的神话短片" --preset story --shots 5 --title "月下空庭" --gemini-config projects/gemini-ui.local.json
 
-# 人工审阅分镜；修改 project.json 后需 replan 再批准
-video-studio approve projects/flower --stage storyboard
-video-studio approve projects/flower --stage credits --max-generations 6
+# 2. 用户确认完整故事后，再生成正式分镜
+video-studio approve projects/film --stage story
+video-studio advance projects/film --gemini-config projects/gemini-ui.local.json
 
-# 每次最多提交一镜。正常自动下载或暂停等待手动下载
-video-studio advance projects/flower --flow-config projects/flow-ui.local.json
-video-studio receive projects/flower --shot 01 --file "C:\Downloads\scene_01.mp4"
-video-studio verify-shot projects/flower --shot 01 --result pass --note "已核对成片、结束画面与音轨"
-video-studio approve projects/flower --stage shot --shot 01
-# 重复 advance 和逐镜审批。所有镜头审核后 advance 自动合成
-video-studio approve projects/flower --stage final
+# 3. Gemini 独立导演复核，无阻断问题后再审核分镜和预算
+video-studio director-review projects/film --gemini-config projects/gemini-ui.local.json
+video-studio approve projects/film --stage storyboard
+video-studio approve projects/film --stage credits --max-generations 5
+
+# 4. 每次只让 Flow 生成一镜，必须检查真实结果
+video-studio advance projects/film --flow-config projects/flow-ui.local.json
+video-studio verify-shot projects/film --shot 01 --result pass --note "看过完整成片，主体与声音都正确"
+video-studio approve projects/film --stage shot --shot 01
+
+# 5. 第二镜起检查相邻两镜的真实剪接预览
+video-studio advance projects/film --flow-config projects/flow-ui.local.json
+video-studio verify-shot projects/film --shot 02 --result pass --note "本镜单独合格"
+video-studio verify-seam projects/film --left 01 --right 02 --result pass --note "实际看过衔接，动作/视线/声音自然"
+video-studio approve projects/film --stage shot --shot 02
+# 后续重复；最后 advance 合成，再人工批准 final
 ```
 
-如果不使用 Gemini 网页，可选用旧的离线 `init` / `gemini-brief` / `plan` / `flow-pack` 流程，或者 `start --provider template` 创建预设分镜，再手工修订 `project.json` / `replan`。这并不等同于 Gemini 自动创作。
+若自动下载不成功，先在 Flow 网页下载，再运行 `receive` 导入相应镜头。真实浏览器提交失败不能自动重试。原有 V1.2 快速路径可以在 `start` 后加 `--quick-storyboard`，原项目也不受影响。详情：[V1.3 导演说明](docs/DIRECTOR_V13.md)。
 
 ## 主要工程能力
 
@@ -106,3 +114,15 @@ video-studio approve projects/my-film --stage shot --shot 01
 如果只是手动导入素材，也可使用 `video-studio render projects/my-film`，新版本自动参考 `postproduction` 配置。若要明确跳过，可用 `--no-voice` / `--no-subtitles`；严格要求保留对白字幕时使用项目中的 `on`，而不是依赖原片随机声轨。
 
 [完整字段及验收示例](docs/QUALITY_V12.md) · 本项目不会宣称 FFmpeg 或静态抽帧能够自动识别人脸错位、人物走位和音画同步。实际 Google Flow Chrome 界面的端到端自动化仍须在账号上联调。
+
+
+## V1.3 — Story-first director & continuity editing
+
+- **真正的两阶段 Gemini 网页导演**：默认 `start` 首先只生成 `production/story_bible.json`，批准 `--stage story` 后再次生成分镜（旧路径 `--quick-storyboard` 仍可用）。镜头里增加叙事目的、景别、情绪、节拍映射与连续性入出状态。
+- **独立导演复核**：`director-review PROJECT --gemini-config PATH` 让 Gemini 独立审故事/镜头/动作和剪接，存在阻断问题或分镜之后改变时不允许 `approve storyboard`。
+- **可执行剪辑时间轴**：新增每镜 `edit.source_in/source_out`；FFmpeg 支持短片段裁取、硬切和实际音视频叠化，不再按生成视频时长机械取满。`match_action`、`match_eyeline` 等为拍摄与审核意图，不能靠代码自动保证。
+- **相邻镜头联审**：为第二镜及以后自动生成已批准上一镜+本镜候选的真实剪接预览；严格连续性模式下须 `verify-seam` 审核通过后才能 `approve shot`。
+- **可选尾帧参考**：`continuity.reference_previous_end=true` 时，从已批准素材中截出上一镜的实际出点参考帧，供配置好的 Flow 上传控件使用；仍须审核浏览器登录和生成额度。
+- **旧项目兼容**：未填写故事圣经、连续性与剪辑字段的项目沿用 V1.2 规则，不会因为升级而修改已生成视频或自动重拍。
+
+完整字段、命令与限制：[docs/DIRECTOR_V13.md](docs/DIRECTOR_V13.md)。V1.3 有本地测试覆盖，但还未在你的实际 Google Flow 网页完成真实端到端浏览器验证。

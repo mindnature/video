@@ -43,3 +43,13 @@ You are the user's production coordinator in Codex. The user should only need to
 - When a candidate arrives, show the **actual** styled review clip and near-final frame. Ask the user whether the observable acceptance conditions and sound/subtitles are correct. Do not assume a file duration check proves the shot is correct.
 - After explicit review confirmation: `video-studio verify-shot PROJECT --shot NN --result pass --note "..."`, then `video-studio approve PROJECT --stage shot --shot NN`. Otherwise reject and keep all history.
 - Actual audio phoneme and on-screen contact sync requires manual inspection; software only compares planned timing and basic track lengths.
+
+
+## V1.3 default: staged story → storyboard → director critique → visual seam QC
+
+**Supersedes the V1.2 direct-to-storyboard quick path for new Gemini web projects.**
+Read `docs/DIRECTOR_V13.md`. After `start`, show only `story_bible.json` and obtain explicit user approval via `approve --stage story`. `advance --gemini-config ...` then asks Gemini for the storyboard with causal beat IDs, emotional reaction, visible face/subject framing, continuity entry/exit and source trim points. Next run `director-review --gemini-config ...`; if any hard issues, revise `project.json` + `replan` + fresh director-review. Do not approve storyboard before a clean critic report and user approval. Budget authorization and Flow generation happen **afterward**, never automatically.
+
+For an approved predecessor + new candidate, the project emits `production/review/seams/seam_LEFT_RIGHT_*.mp4`. Ask the user to watch the seam; if continuous, `verify-seam --left ... --right ... --result pass --note ...`, then approve shot. Rejection retains all original versions. If frame reference is opted in, project extracts only an approved previous shot's actual end frame. A shot 8s long might be edited to 3s using `edit`, so review `edit_timeline.json` before reporting final duration.
+
+All Gemini/Flow browser interactions are best effort against the user's current visible UI. No claims of end-to-end video generation without watching actual downloaded video and collecting operator approvals. Do NOT submit more Flow attempts based solely on the user's agreement to edit the script.

@@ -68,11 +68,12 @@ def parser() -> argparse.ArgumentParser:
     a.add_argument("--provider", choices=["gemini-web", "gemini", "template"], default="gemini-web",
                    help="Chrome Gemini by default; API and template optional")
     a.add_argument("--gemini-config", type=Path, help="local verified Gemini web CSS selectors")
+    a.add_argument("--quick-storyboard", action="store_true", help="legacy single Gemini plan; skip script-first review (not recommended)")
     status = sub.add_parser("status", help="show saved workflow and exact next action")
     status.add_argument("project")
-    app = sub.add_parser("approve", help="human review gate: storyboard, credits, shot, final")
+    app = sub.add_parser("approve", help="human review gates: story, storyboard, credits, shot, final")
     app.add_argument("project")
-    app.add_argument("--stage", choices=["storyboard", "credits", "shot", "final"], required=True)
+    app.add_argument("--stage", choices=["story", "storyboard", "credits", "shot", "final"], required=True)
     app.add_argument("--shot")
     app.add_argument("--max-generations", type=int)
     adv = sub.add_parser("advance", help="run one Flow generation or produce final render; resumable")
@@ -88,6 +89,12 @@ def parser() -> argparse.ArgumentParser:
     verify.add_argument("--shot", required=True)
     verify.add_argument("--result", choices=["pass", "fail"], required=True)
     verify.add_argument("--note", required=True)
+    seam = sub.add_parser("verify-seam", help="human approval of an actual adjacent-shot edit preview")
+    seam.add_argument("project")
+    seam.add_argument("--left", required=True)
+    seam.add_argument("--right", required=True)
+    seam.add_argument("--result", choices=["pass", "fail"], required=True)
+    seam.add_argument("--note", required=True)
     rej = sub.add_parser("reject", help="reject a candidate, keep original, require authorized retry")
     rej.add_argument("project")
     rej.add_argument("--shot", required=True)
@@ -104,6 +111,15 @@ def parser() -> argparse.ArgumentParser:
     gem_inspect = sub.add_parser("inspect-gemini", help="Gemini visible UI screenshot and selector counts")
     gem_inspect.add_argument("project")
     gem_inspect.add_argument("--gemini-config", type=Path)
+    critic = sub.add_parser("director-review", help="independent Gemini screenplay/storyboard/continuity critic before Flow")
+    critic.add_argument("project")
+    critic.add_argument("--gemini-config", type=Path)
+    critic_recv = sub.add_parser("receive-director-review", help="recover checked director review JSON from Gemini")
+    critic_recv.add_argument("project")
+    critic_recv.add_argument("--file", type=Path, required=True)
+    critic_retry = sub.add_parser("resolve-director-review", help="explicitly retry an uncertain reviewer turn")
+    critic_retry.add_argument("project")
+    critic_retry.add_argument("--action", choices=["retry"], required=True)
     gem_receive = sub.add_parser("receive-gemini", help="recover checked storyboard JSON from Gemini web response")
     gem_receive.add_argument("project")
     gem_receive.add_argument("--file", type=Path, required=True)
@@ -161,7 +177,8 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "start":
             count = args.shots or (6 if args.preset == "handcraft" else 4 if args.preset == "general" else 5)
             state = production.start(Path(args.name), args.idea, args.preset, args.title, count,
-                                     args.reference, args.provider, gemini_config=args.gemini_config)
+                                     args.reference, args.provider, gemini_config=args.gemini_config,
+                                     director_first=not args.quick_storyboard)
             print(production.summary(state))
         elif args.command == "status":
             print(production.summary(production.get_state(Path(args.project).resolve())))
@@ -177,6 +194,9 @@ def main(argv: list[str] | None = None) -> int:
             print(production.summary(state))
         elif args.command == "verify-shot":
             state = production.verify_shot(Path(args.project), args.shot, args.result, args.note)
+            print(production.summary(state))
+        elif args.command == "verify-seam":
+            state = production.verify_seam(Path(args.project), args.left, args.right, args.result, args.note)
             print(production.summary(state))
         elif args.command == "reject":
             state = production.reject_shot(Path(args.project), args.shot, args.reason)
@@ -195,6 +215,15 @@ def main(argv: list[str] | None = None) -> int:
             from .gemini_browser import GeminiBrowser
             output = GeminiBrowser(args.gemini_config).inspect(Path(args.project).resolve())
             print(f"Gemini UI probe saved locally: {output}")
+        elif args.command == "director-review":
+            state = production.director_review(Path(args.project), config=args.gemini_config)
+            print(production.summary(state))
+        elif args.command == "receive-director-review":
+            state = production.receive_director_review(Path(args.project), args.file)
+            print(production.summary(state))
+        elif args.command == "resolve-director-review":
+            state = production.resolve_director_review(Path(args.project), args.action)
+            print(production.summary(state))
         elif args.command == "receive-gemini":
             state = production.receive_gemini(Path(args.project), args.file)
             print(production.summary(state))

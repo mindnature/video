@@ -65,7 +65,13 @@ def validate(project: dict) -> None:
     for flag in ("voice", "subtitles"):
         if post.get(flag, "auto") not in ("auto", "on", "off"):
             raise StudioError(f"postproduction.{flag} must be auto/on/off")
+    from .narrative import validate_story, validate_shot_edit, validate_continuity
+    if "story_bible" in project:
+        validate_story(project["story_bible"])
+    if "continuity_required" in project and not isinstance(project["continuity_required"], bool):
+        raise StudioError("continuity_required must be boolean")
     used = set()
+    previous_shot = None
     for shot in shots:
         sid = shot.get("id")
         if not isinstance(sid, str) or not SHOT_ID.fullmatch(sid) or sid in used:
@@ -110,6 +116,9 @@ def validate(project: dict) -> None:
             if not isinstance(beat.get("visual"), str):
                 raise StudioError(f"shot {sid}: beat must have visual text")
             previous_end = end
+        validate_shot_edit(shot, previous_shot)
+        validate_continuity(shot)
+        previous_shot = shot
         for line in shot.get("dialogue", []):
             if not all(k in line for k in ("speaker", "text", "start", "end")):
                 raise StudioError(f"shot {sid}: dialogue requires speaker/text/start/end")
@@ -163,11 +172,22 @@ def shot_prompt(project: dict, shot: dict) -> str:
                  "required_events": "必须发生的动作事件", "audio_checks": "待核实的声音事件"}
     acceptance = "\n".join(f"- {acc_names[key]}：{'、'.join(acc[key])}" for key in acc_names if acc.get(key))
     acceptance = acceptance or "- 依照本镜动作结尾验收；检查末尾关键帧。"
+    from .narrative import edit_range
+    start, end = edit_range(shot)
+    cont = shot.get("continuity", {})
+    direction = (f"叙事目的：{shot.get('narrative_purpose', '遵循本镜动作')}。"
+                 f"情绪：{shot.get('emotional_state', '自然表演')}。"
+                 f"景别与主体：{shot.get('framing', shot['camera'])}。\n"
+                 f"进入状态：{json.dumps(cont.get('entry', {}), ensure_ascii=False)}。"
+                 f"退出状态：{json.dumps(cont.get('exit', {}), ensure_ascii=False)}。"
+                 f"与前镜衔接：{cont.get('link_from_previous', '根据场景自然衔接')}。\n"
+                 f"预计有效剪入区间：原生成素材 {start:g}-{end:g} 秒（不要将整段生成时长当作必须使用的镜头时长）。\n")
     return (
         f"# 镜头 {shot['id']}｜{shot['scene']}\n"
         f"画幅 {ratio}，时长 {duration} 秒，{project.get('style', '自然真实影视风格')}。\n"
         f"场景：{shot['scene']}。镜头：{shot['camera']}。\n"
         f"本镜目标/动作：{shot['action']}\n"
+        f"导演设计：{direction}"
         f"本镜出场人物和主体身份（身份描述不是永久站位指令）：\n{listed}\n"
         f"材料/道具：{materials}\n"
         f"动作时间轴：\n{beats}\n"
@@ -189,16 +209,21 @@ def srt_time(seconds: float) -> str:
 
 
 def lines_with_offsets(project: dict) -> list[dict]:
+    from .narrative import timeline
     result: list[dict] = []
-    offset = 0.0
+    by_id = {entry["id"]: entry for entry in timeline(project)}
     for shot in project["shots"]:
+        entry = by_id[shot["id"]]
         for i, dialogue in enumerate(shot.get("dialogue", []), start=1):
+            visible_start = max(float(dialogue["start"]), entry["source_in"])
+            visible_end = min(float(dialogue["end"]), entry["source_out"])
+            if visible_start >= visible_end:
+                continue  # Dialogue outside the final editorial range.
             item = dict(dialogue)
             item.update(id=f"{shot['id']}_{i:02d}", shot=shot["id"],
-                        absolute_start=offset + dialogue["start"],
-                        absolute_end=offset + dialogue["end"])
+                        absolute_start=entry["timeline_in"] + visible_start - entry["source_in"],
+                        absolute_end=entry["timeline_in"] + visible_end - entry["source_in"])
             result.append(item)
-        offset += shot["duration"]
     return result
 
 
@@ -211,6 +236,8 @@ def export(project_root: Path, project: dict) -> Path:
         rows.extend([f"## {shot['id']} · {shot['scene']}（{shot['duration']}秒）",
                      f"镜头：{shot['camera']}", f"动作：{shot['action']}", ""])
     (output / "storyboard.md").write_text("\n".join(rows), encoding="utf-8")
+    from .narrative import export_narrative
+    export_narrative(project_root, project)
     from .quality import audit_plan
     write_json(output / "plan_audit.json", audit_plan(project))
     review = output / "review"
@@ -324,9 +351,51 @@ def available_output(path: Path) -> Path:
         i += 1
 
 
+
+def join_edited_clips(pieces: list[Path], shots: list[dict], joined: Path, fps: int) -> None:
+    """Join cuts and optional short AV dissolves on a *real edited timeline*.
+
+    Match cuts/eyelines are director semantics and remain hard cuts. Dissolve
+    is the only overlap transition implemented in FFmpeg; no silent fake effect.
+    """
+    from .narrative import edit_duration, transition_duration
+    ffmpeg = need_binary("ffmpeg")
+    if len(pieces) == 1:
+        shutil.copy2(pieces[0], joined)
+        return
+    if not any(transition_duration(shot) for shot in shots[1:]):
+        listing = joined.parent / "concat.txt"
+        listing.write_text("".join("file '" + p.as_posix().replace("'", "'\\''") + "'\n" for p in pieces), encoding="utf-8")
+        run([ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-f", "concat", "-safe", "0", "-i", str(listing),
+             "-c", "copy", "-movflags", "+faststart", str(joined)])
+        return
+    cmd = [ffmpeg, "-hide_banner", "-loglevel", "error", "-y"]
+    for piece in pieces:
+        cmd.extend(["-i", str(piece)])
+    filters = []
+    vl, al, length = "0:v", "0:a", edit_duration(shots[0])
+    for i, shot in enumerate(shots[1:], 1):
+        delta = transition_duration(shot)
+        next_v, next_a = f"v{i}", f"a{i}"
+        if delta:
+            # xfade expects identical size, fps, timebase and pixel format.
+            # Normalize the joined operand before it is fed into subsequent fades.
+            filters.append(f"[{vl}][{i}:v]xfade=transition=fade:duration={delta:g}:offset={length-delta:g}[{next_v}]")
+            filters.append(f"[{al}][{i}:a]acrossfade=d={delta:g}:c1=tri:c2=tri[{next_a}]")
+        else:
+            filters.append(f"[{vl}][{al}][{i}:v][{i}:a]concat=n=2:v=1:a=1[{next_v}][{next_a}]")
+        length += edit_duration(shot) - delta
+        vl, al = next_v, next_a
+    cmd += ["-filter_complex", ";".join(filters), "-map", f"[{vl}]", "-map", f"[{al}]",
+            "-r", str(fps), "-c:v", "libx264", "-preset", "medium", "-crf", "19", "-pix_fmt", "yuv420p",
+            "-c:a", "aac", "-ar", "48000", "-b:a", "192k", "-movflags", "+faststart", str(joined)]
+    run(cmd)
+
 def render(root: Path, project: dict, output: Path | None = None, mix_voice: bool | None = None, burn_subtitles: bool | None = None, shot_ids: list[str] | None = None) -> Path:
     ffmpeg = need_binary("ffmpeg")
+    # Preserve original project order regardless of which shots the caller requests.
     selected_project = project if shot_ids is None else dict(project, shots=[s for s in project["shots"] if s["id"] in shot_ids])
+    from .narrative import edit_range, edit_duration, timeline
     if not selected_project["shots"]:
         raise StudioError("No shots selected for render")
     post = project.get("postproduction", {})
@@ -344,11 +413,7 @@ def render(root: Path, project: dict, output: Path | None = None, mix_voice: boo
     work = root / "work" / "cuts"
     work.mkdir(parents=True, exist_ok=True)
     pieces = []
-    elapsed = 0.0
-    source_offsets = {}
-    for original in project["shots"]:
-        source_offsets[original["id"]] = elapsed
-        elapsed += original["duration"]
+    source_offsets = {entry["id"]: entry["timeline_in"] for entry in timeline(project)}
     for shot in selected_project["shots"]:
         src = selected_asset(root, index, "shots", shot["id"])
         if not src or not src.is_file():
@@ -357,32 +422,31 @@ def render(root: Path, project: dict, output: Path | None = None, mix_voice: boo
         if not any(s.get("codec_type") == "video" for s in info.get("streams", [])):
             raise StudioError(f"Shot {shot['id']} has no video stream")
         has_audio = any(s.get("codec_type") == "audio" for s in info.get("streams", []))
-        duration = shot["duration"]
+        duration = edit_duration(shot)
+        source_in, source_out = edit_range(shot)
         dest = work / f"cut_{shot['id']}.mp4"
         # Scale to fit WITHOUT cropping or stretching original artwork.
         from .postfx import style_filters
         fx = style_filters(project, shot, width, height, fps, source_offsets[shot["id"]])
-        video_filter = (f"[0:v]fps={fps},scale={width}:{height}:force_original_aspect_ratio=decrease:flags=lanczos,"
+        video_filter = (f"[0:v]tpad=stop_mode=clone:stop_duration={shot['duration']:g},"
+                        f"trim=start={source_in:g}:end={source_out:g},setpts=PTS-STARTPTS,"
+                        f"fps={fps},scale={width}:{height}:force_original_aspect_ratio=decrease:flags=lanczos,"
                         f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2,setsar=1,"
-                        f"tpad=stop_mode=clone:stop_duration={duration},trim=duration={duration},"
                         "setpts=PTS-STARTPTS" + ("," + ",".join(fx) if fx else "") + ",format=yuv420p[v]")
         cmd = [ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-i", str(src)]
         ainput = "0:a:0"
         if not has_audio:
             cmd += ["-f", "lavfi", "-i", "anullsrc=r=48000:cl=stereo"]
             ainput = "1:a:0"
-        afilter = f"[{ainput}]aresample=48000,apad,atrim=duration={duration},asetpts=PTS-STARTPTS[a]"
+        afilter = (f"[{ainput}]aresample=48000,apad,atrim=start={source_in:g}:end={source_out:g},"
+                   "asetpts=PTS-STARTPTS[a]")
         cmd += ["-filter_complex", video_filter + ";" + afilter, "-map", "[v]", "-map", "[a]",
                 "-r", str(fps), "-c:v", "libx264", "-preset", "medium", "-crf", "19", "-pix_fmt", "yuv420p",
                 "-c:a", "aac", "-ar", "48000", "-b:a", "192k", "-movflags", "+faststart", str(dest)]
         run(cmd)
         pieces.append(dest)
-    listing = root / "work" / "concat.txt"
-    listing.parent.mkdir(parents=True, exist_ok=True)
-    listing.write_text("".join(f"file '{p.as_posix().replace(chr(39), chr(39)+chr(92)+chr(39)+chr(39))}'\n" for p in pieces), encoding="utf-8")
     joined = root / "work" / "joined.mp4"
-    run([ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-f", "concat", "-safe", "0", "-i", str(listing),
-         "-c", "copy", "-movflags", "+faststart", str(joined)])
+    join_edited_clips(pieces, selected_project["shots"], joined, fps)
     current = joined
     voices = []
     for line in lines_with_offsets(selected_project):
@@ -390,14 +454,15 @@ def render(root: Path, project: dict, output: Path | None = None, mix_voice: boo
         if mix_voice and file and file.is_file():
             voices.append((line["absolute_start"], file, 1.0))
     effects = []
-    total_offset = 0.0
+    selected_timeline = {entry["id"]: entry for entry in timeline(selected_project)}
     for shot in selected_project["shots"]:
+        entry = selected_timeline[shot["id"]]
         for cue in shot.get("sound_events", []):
             asset = (root / cue["path"]).resolve()
             if not asset.is_relative_to(root.resolve()) or not asset.is_file():
                 raise StudioError(f"Missing or unsafe sound effect for shot {shot['id']}: {cue['path']}")
-            effects.append((total_offset + cue["time"], asset, float(cue.get("gain", 1.0))))
-        total_offset += shot["duration"]
+            if entry["source_in"] <= cue["time"] < entry["source_out"]:
+                effects.append((entry["timeline_in"] + cue["time"] - entry["source_in"], asset, float(cue.get("gain", 1.0))))
     if voices or effects:
         voiced = root / "work" / "voiced.mp4"
         cmd = [ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-i", str(current)]
@@ -451,8 +516,10 @@ def qa(root: Path, project: dict) -> dict:
             videos = [stream for stream in info.get("streams", []) if stream.get("codec_type") == "video"]
             if not videos:
                 checks.append({"shot": shot["id"], "level": "ERROR", "message": "no video stream"})
-            if duration < shot["duration"] - 0.2:
-                checks.append({"shot": shot["id"], "level": "WARN", "message": f"raw clip {duration:.2f}s shorter than target {shot['duration']}s; render will freeze-pad"})
+            from .narrative import edit_range
+            required_source_end = edit_range(shot)[1]
+            if duration < required_source_end - 0.2:
+                checks.append({"shot": shot["id"], "level": "WARN", "message": f"raw clip {duration:.2f}s shorter than editorial source_out {required_source_end:g}s; render will freeze-pad"})
             if not any(stream.get("codec_type") == "audio" for stream in info.get("streams", [])):
                 checks.append({"shot": shot["id"], "level": "INFO", "message": "no source audio; a silent track will be generated"})
         except (StudioError, subprocess.CalledProcessError, ValueError) as err:

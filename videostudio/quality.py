@@ -71,6 +71,13 @@ def audit_plan(project: dict) -> dict:
     style = project.get("postproduction", {}).get("style", "clean")
     if style == "surveillance" and not project.get("postproduction", {}).get("camera_prefix", "CAM"):
         issue("WARN", "CAMERA_LABEL", "建议为监控画面配置机位标识")
+    # Script-first director checks are optional for old V1.2 projects, but
+    # blocking when V1.3 continuity_required has been explicitly enabled.
+    from .narrative import continuity_audit, edit_duration
+    findings.extend(continuity_audit(project)["findings"])
+    for shot in project.get("shots", []):
+        if shot.get("coverage_type") == "detail" and edit_duration(shot) > 4.0:
+            issue("WARN", "LONG_DETAIL_INSERT", "局部特写超过4秒；确认是否需要露脸/全景反应或改用短插入", shot["id"])
     return {"ready": not any(x["level"] == "ERROR" for x in findings),
             "errors": sum(x["level"] == "ERROR" for x in findings),
             "warnings": sum(x["level"] == "WARN" for x in findings),

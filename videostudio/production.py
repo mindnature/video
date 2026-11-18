@@ -47,7 +47,8 @@ def event(state: dict, kind: str, **detail: Any) -> None:
 
 def start(root: Path, idea: str, mode: str, title: str, shots: int,
           reference_files: list[Path] | None = None, provider: str = "gemini-web",
-          gemini_config: Path | None = None, gemini_browser=None) -> dict:
+          gemini_config: Path | None = None, gemini_browser=None,
+          director_first: bool = False) -> dict:
     """Generate a Gemini shot plan then stop at first human review gate."""
     root = root.expanduser().resolve()
     if state_file(root).exists() or (root / "project.json").exists():
@@ -83,7 +84,10 @@ def start(root: Path, idea: str, mode: str, title: str, shots: int,
         flow_pack(root, project)
         gemini_brief(root, project, idea)
     state = {"schema": 2, "title": project["title"],
-             "phase": "gemini_ready" if provider == "gemini-web" else "awaiting_storyboard_approval",
+             "phase": ("gemini_story_ready" if director_first else "gemini_ready") if provider == "gemini-web" else "awaiting_storyboard_approval",
+             "director_first": bool(director_first and provider == "gemini-web"),
+             "approved_story_digest": None, "director_review_digest": None, "director_review_pass": False,
+             "gemini_step": "story" if director_first and provider == "gemini-web" else "plan",
              "idea": idea, "provider": provider, "references": saved_refs,
              "requested_mode": mode, "requested_shots": shots, "gemini_attempts": 0,
              "approved_plan_digest": None, "credits_remaining": 0,
@@ -103,6 +107,17 @@ def _accept_gemini_plan(root: Path, state: dict, project: dict) -> dict:
     validate(project)
     if project["mode"] != state["requested_mode"] or len(project["shots"]) != state["requested_shots"]:
         raise StudioError("Gemini storyboard does not match requested mode or shot count")
+    if state.get("director_first"):
+        from .narrative import continuity_audit
+        story_path = root / "production" / "story_bible.json"
+        if (not story_path.is_file() or
+                digest(story_path) != state.get("approved_story_digest") or
+                project.get("story_bible") != json.loads(story_path.read_text(encoding="utf-8")) or
+                not project.get("continuity_required")):
+            raise StudioError("Storyboard must preserve approved story bible and enable strict continuity")
+        audit = continuity_audit(project)
+        if not audit["ready"]:
+            raise StudioError(f"Storyboard has {audit['errors']} blocking continuity issues")
     # Save validated JSON, then export files. A crashed handoff remains in
     # gemini_submission_uncertain; never automatically submit another prompt.
     write_json(root / "project.json", project)
@@ -113,49 +128,83 @@ def _accept_gemini_plan(root: Path, state: dict, project: dict) -> dict:
     state["shots"] = {shot["id"]: {"status": "pending", "attempts": 0,
                         "candidates": [], "approved_file": None} for shot in project["shots"]}
     state["phase"] = "awaiting_storyboard_approval"
+    state["director_review_digest"] = None
+    state["director_review_pass"] = False
     event(state, "received_gemini_storyboard", shots=len(project["shots"]))
     save_state(root, state)
     return state
 
 
+def _accept_gemini_story(root: Path, state: dict, story: dict) -> dict:
+    from .narrative import validate_story
+    validate_story(story)
+    path = root / "production" / "story_bible.json"
+    write_json(path, story)
+    # Deliberately not a storyboard: no Flow prompt is emitted until the
+    # user approves the screenplay and Gemini generates stage 2.
+    state["phase"] = "awaiting_story_approval"
+    state["approved_story_digest"] = None
+    event(state, "received_story_bible", beats=len(story["beats"]))
+    save_state(root, state)
+    return state
+
+
 def generate_gemini(root: Path, browser=None, config: Path | None = None) -> dict:
-    """One Gemini chat submission max; if response unclear never auto retry."""
+    """One non-retried website turn per stage, with distinct story and plan gates."""
     root = Path(root).expanduser().resolve()
     state = get_state(root)
-    if state["provider"] != "gemini-web" or state["phase"] != "gemini_ready":
+    phase = state["phase"]
+    allowed = ("gemini_story_ready", "gemini_plan_ready", "gemini_ready")
+    if state["provider"] != "gemini-web" or phase not in allowed:
         raise StudioError("Gemini web submission not authorized in current phase")
     if browser is None:
         from .gemini_browser import GeminiBrowser
         browser = GeminiBrowser(config)
     references = [root / path for path in state["references"]]
-    # All non-mutating checks happen before reserving the attempt.
     browser.preflight(references)
+    step = "story" if phase == "gemini_story_ready" else "plan"
+    state["gemini_step"] = step
     state["gemini_attempts"] += 1
     state["phase"] = "gemini_submission_uncertain"
-    event(state, "gemini_submission_reserved", attempt=state["gemini_attempts"])
+    event(state, "gemini_submission_reserved", step=step, attempt=state["gemini_attempts"])
     save_state(root, state)
     try:
-        result = browser.generate_plan(state["idea"], state["requested_mode"], state["title"],
-                                       state["requested_shots"], references)
+        if step == "story":
+            result = browser.generate_story(state["idea"], state["requested_mode"], state["title"],
+                                            state["requested_shots"], references)
+            return _accept_gemini_story(root, state, result)
+        if state.get("director_first"):
+            story_file = root / "production" / "story_bible.json"
+            if digest(story_file) != state.get("approved_story_digest"):
+                raise StudioError("Approved story changed; return to story review")
+            story = json.loads(story_file.read_text(encoding="utf-8"))
+            result = browser.generate_plan_from_story(state["idea"], state["requested_mode"], state["title"],
+                                                      state["requested_shots"], references, story)
+        else:
+            result = browser.generate_plan(state["idea"], state["requested_mode"], state["title"],
+                                           state["requested_shots"], references)
         return _accept_gemini_plan(root, state, result)
     except Exception as exc:
-        event(state, "gemini_error", error=f"{type(exc).__name__}: {str(exc)[:300]}")
+        event(state, "gemini_error", step=step, error=f"{type(exc).__name__}: {str(exc)[:300]}")
         save_state(root, state)
-        raise StudioError("Gemini web submission uncertain: inspect Gemini chat before retrying. "
-                          "Use receive-gemini for a valid saved JSON, or resolve-gemini --action retry "
-                          "after explicit human confirmation. " + str(exc)) from exc
+        raise StudioError(f"Gemini {step} submission uncertain: inspect visible chat before retrying. "
+                          "Use receive-gemini for a saved JSON, or resolve-gemini --action retry "
+                          "after explicit operator confirmation. " + str(exc)) from exc
 
 
 def receive_gemini(root: Path, response_file: Path) -> dict:
-    """Manually recover valid Gemini JSON from a visible web response."""
+    """Recover only the expected type of JSON for the current Gemini stage."""
     root = Path(root).expanduser().resolve()
     state = get_state(root)
-    if state["provider"] != "gemini-web" or state["phase"] not in ("gemini_ready", "gemini_submission_uncertain"):
+    if state["provider"] != "gemini-web" or state["phase"] not in (
+            "gemini_ready", "gemini_story_ready", "gemini_plan_ready", "gemini_submission_uncertain"):
         raise StudioError("Not expecting a Gemini web response")
+    content = Path(response_file).expanduser().resolve().read_text(encoding="utf-8")
+    if state.get("gemini_step") == "story":
+        from .narrative import parse_story_response
+        return _accept_gemini_story(root, state, parse_story_response(content))
     from .gemini_browser import extract_project
-    text = Path(response_file).expanduser().resolve().read_text(encoding="utf-8")
-    project = extract_project(text, state["requested_mode"], state["requested_shots"])
-    return _accept_gemini_plan(root, state, project)
+    return _accept_gemini_plan(root, state, extract_project(content, state["requested_mode"], state["requested_shots"]))
 
 
 def resolve_gemini(root: Path, action: str) -> dict:
@@ -165,8 +214,69 @@ def resolve_gemini(root: Path, action: str) -> dict:
         raise StudioError("No uncertain Gemini submission to resolve")
     if action != "retry":
         raise StudioError("Only explicit retry is allowed; use receive-gemini for manual recovery")
-    state["phase"] = "gemini_ready"
-    event(state, "gemini_retry_authorized_by_operator")
+    state["phase"] = ("gemini_story_ready" if state.get("gemini_step") == "story" else
+                      "gemini_plan_ready" if state.get("director_first") else "gemini_ready")
+    event(state, "gemini_retry_authorized_by_operator", step=state.get("gemini_step"))
+    save_state(root, state)
+    return state
+
+
+
+def _accept_director_review(root: Path, state: dict, review: dict) -> dict:
+    from .narrative import parse_director_review
+    checked = parse_director_review(json.dumps(review, ensure_ascii=False))
+    write_json(root / "production" / "director_review.json", checked)
+    state["phase"] = "awaiting_storyboard_approval"
+    state["director_review_digest"] = digest(root / "project.json")
+    state["director_review_pass"] = checked["pass"]
+    event(state, "director_review_received", passed=checked["pass"], problems=len(checked["hard_problems"]))
+    save_state(root, state)
+    return state
+
+
+def director_review(root: Path, browser=None, config: Path | None = None) -> dict:
+    """Third Gemini turn: independent critic, with explicit retry rules."""
+    root, project = load_project(root)
+    state = get_state(root)
+    if not state.get("director_first") or state["phase"] != "awaiting_storyboard_approval":
+        raise StudioError("Director review is only available at the storyboard gate of a two-stage project")
+    from .quality import audit_plan
+    check = audit_plan(project)
+    if not check["ready"]:
+        raise StudioError(f"Resolve {check['errors']} structural errors before submitting director review")
+    if browser is None:
+        from .gemini_browser import GeminiBrowser
+        browser = GeminiBrowser(config)
+    browser.preflight([])
+    state["phase"] = "director_review_uncertain"
+    event(state, "director_review_submitted")
+    save_state(root, state)
+    try:
+        result = browser.review_plan(project)
+        return _accept_director_review(root, state, result)
+    except Exception as exc:
+        event(state, "director_review_error", error=f"{type(exc).__name__}: {str(exc)[:220]}")
+        save_state(root, state)
+        raise StudioError("Director review submission uncertain; inspect Gemini chat before manually importing the review. " + str(exc)) from exc
+
+
+def receive_director_review(root: Path, response_file: Path) -> dict:
+    root, project = load_project(root)
+    state = get_state(root)
+    if not state.get("director_first") or state["phase"] not in ("director_review_uncertain", "awaiting_storyboard_approval"):
+        raise StudioError("Not accepting a director review in current phase")
+    from .narrative import parse_director_review
+    doc = parse_director_review(Path(response_file).expanduser().resolve().read_text(encoding="utf-8"))
+    return _accept_director_review(root, state, doc)
+
+
+def resolve_director_review(root: Path, action: str) -> dict:
+    root = Path(root).expanduser().resolve()
+    state = get_state(root)
+    if state["phase"] != "director_review_uncertain" or action != "retry":
+        raise StudioError("Only an explicitly approved retry can resolve an uncertain director review")
+    state["phase"] = "awaiting_storyboard_approval"
+    event(state, "director_review_retry_authorized")
     save_state(root, state)
     return state
 
@@ -191,6 +301,8 @@ def replan(root: Path) -> dict:
     state["shots"] = {shot["id"]: {"status": "pending", "attempts": 0, "candidates": [], "approved_file": None}
                       for shot in project["shots"]}
     state["phase"] = "awaiting_storyboard_approval"
+    state["director_review_digest"] = None
+    state["director_review_pass"] = False
     state["approved_plan_digest"] = None
     state["credits_remaining"] = 0
     event(state, "replanned")
@@ -201,9 +313,27 @@ def replan(root: Path) -> dict:
 def approve(root: Path, stage: str, shot_id: str | None = None, max_generations: int | None = None) -> dict:
     root, project = load_project(root)
     state = get_state(root)
-    if stage == "storyboard":
+    if stage == "story":
+        if not state.get("director_first") or state["phase"] != "awaiting_story_approval":
+            raise StudioError("Not awaiting the story bible approval")
+        story_file = root / "production" / "story_bible.json"
+        from .narrative import validate_story
+        validate_story(json.loads(story_file.read_text(encoding="utf-8")))
+        state["approved_story_digest"] = digest(story_file)
+        state["gemini_step"] = "plan"
+        state["phase"] = "gemini_plan_ready"
+        event(state, "approved_story", sha256=state["approved_story_digest"])
+    elif stage == "storyboard":
         if state["phase"] != "awaiting_storyboard_approval":
             raise StudioError("Not awaiting storyboard review")
+        if state.get("director_first"):
+            story_file = root / "production" / "story_bible.json"
+            if digest(story_file) != state.get("approved_story_digest") or project.get("story_bible") != json.loads(story_file.read_text(encoding="utf-8")):
+                raise StudioError("Approved story must match project.story_bible before storyboard approval")
+        if state.get("director_first"):
+            if (not state.get("director_review_pass") or
+                    state.get("director_review_digest") != digest(root / "project.json")):
+                raise StudioError("Run an independent Gemini director-review and resolve hard problems before storyboard approval")
         export(root, project)
         flow_pack(root, project)
         from .quality import audit_plan
@@ -237,6 +367,16 @@ def approve(root: Path, stage: str, shot_id: str | None = None, max_generations:
             raise StudioError("Run 'verify-shot --shot ID --result pass --note ...' after watching the entire candidate and its end frame")
         if project.get("postproduction", {}).get("style", "clean") != "clean" and not item.get("review_clip"):
             raise StudioError("Styled review clip was not rendered; fix postproduction before approving")
+        if project.get("continuity_required"):
+            order = [x["id"] for x in project["shots"]]
+            idx = order.index(shot_id)
+            if idx > 0:
+                verified = item.get("seam_verification", {})
+                if (not item.get("seam_review") or not (root / item["seam_review"]).is_file()
+                        or verified.get("result") != "pass"
+                        or verified.get("candidate") != item["candidates"][-1]
+                        or verified.get("previous") != order[idx - 1]):
+                    raise StudioError("Review actual adjacent-shot join, then verify-seam --left XX --right YY --result pass")
         chosen = Path(item["candidates"][-1])
         if not (root / chosen).is_file():
             raise StudioError("Imported candidate is missing from disk")
@@ -258,7 +398,7 @@ def approve(root: Path, stage: str, shot_id: str | None = None, max_generations:
         state["phase"] = "completed"
         event(state, "approved_final", master=master)
     else:
-        raise StudioError("stage must be storyboard, credits, shot or final")
+        raise StudioError("stage must be story, storyboard, credits, shot or final")
     save_state(root, state)
     return state
 
@@ -298,7 +438,16 @@ def _record_candidate(root: Path, state: dict, shot_id: str, dest: Path) -> None
         item["review_clip"] = None
         item["review_error"] = f"{type(exc).__name__}: {str(exc)[:220]}"
         event(state, "preview_failed", shot=shot_id, error=item["review_error"])
+    # A replacement candidate invalidates prior seam approvals and previews.
     item.pop("human_verification", None)
+    item.pop("seam_verification", None)
+    item.pop("seam_review", None)
+    if root.joinpath("project.json").is_file():
+        try:
+            item["seam_review"] = make_seam_review(root, state, shot_id)
+        except Exception as exc:
+            item["seam_error"] = f"{type(exc).__name__}: {str(exc)[:240]}"
+            event(state, "seam_preview_failed", shot=shot_id, error=item["seam_error"])
     save_state(root, state)
 
 
@@ -328,6 +477,102 @@ def _make_preview(root: Path, shot_id: str, src: Path) -> str | None:
                         "-ss", f"{when:.3f}", "-i", str(output), "-frames:v", "1", str(image)],
                        check=True, capture_output=True, timeout=30)
     return output.relative_to(root).as_posix()
+
+
+
+def make_seam_review(root: Path, state: dict, right_id: str) -> str | None:
+    """Render the actual approved-left + candidate-right join (not a mock image).
+
+    A 3–5 s seam excerpt is also emitted so humans can inspect the action,
+    gaze and audio bridge in context, not only an isolated still.
+    """
+    root, project = load_project(root)
+    order = [shot["id"] for shot in project["shots"]]
+    position = order.index(right_id)
+    if position == 0:
+        return None
+    left_id = order[position - 1]
+    left_state = state["shots"][left_id]
+    if left_state["status"] != "approved" or not left_state.get("approved_file"):
+        return None
+    dest = root / "production" / "review" / "seams"
+    dest.mkdir(parents=True, exist_ok=True)
+    candidate = Path(state["shots"][right_id]["candidates"][-1])
+    label = candidate.stem
+    pair = dest / f"pair_{left_id}_{right_id}_{label}.mp4"
+    render(root, project, pair, shot_ids=[left_id, right_id])
+    from .core import need_binary
+    from .narrative import edit_duration, transition_duration
+    import subprocess
+    left = project["shots"][position - 1]
+    right = project["shots"][position]
+    cut_point = edit_duration(left) - transition_duration(right)
+    source_start = max(0.0, cut_point - 2.0)
+    target = dest / f"seam_{left_id}_{right_id}_{label}.mp4"
+    subprocess.run([need_binary("ffmpeg"), "-hide_banner", "-loglevel", "error", "-y",
+                    "-ss", f"{source_start:.3f}", "-i", str(pair), "-t", "4.0",
+                    "-c:v", "libx264", "-preset", "veryfast", "-crf", "22",
+                    "-c:a", "aac", "-movflags", "+faststart", str(target)],
+                   check=True, capture_output=True, timeout=180)
+    return target.relative_to(root).as_posix()
+
+
+def verify_seam(root: Path, left_id: str, right_id: str, result: str, note: str) -> dict:
+    """Human checks one actual adjacent edit; no automatic visual claims."""
+    root, project = load_project(root)
+    state = get_state(root)
+    ids = [shot["id"] for shot in project["shots"]]
+    if left_id not in ids or right_id not in ids or ids.index(right_id) != ids.index(left_id) + 1:
+        raise StudioError("Seam verification requires adjacent ordered shot IDs")
+    item = state["shots"][right_id]
+    if state["phase"] != "awaiting_shot_approval" or item["status"] != "awaiting_review":
+        raise StudioError("No pending right-shot candidate for seam review")
+    if state["shots"][left_id]["status"] != "approved":
+        raise StudioError("Previous shot must be approved before seam verification")
+    if result not in ("pass", "fail") or not note.strip():
+        raise StudioError("Provide human --result pass/fail and nonempty --note")
+    if not item.get("seam_review") or not (root / item["seam_review"]).is_file():
+        raise StudioError("No actual seam clip was rendered; inspect seam_error and repair before approval")
+    record = {"left": left_id, "right": right_id, "result": result, "note": note,
+              "candidate": item["candidates"][-1], "previous": left_id,
+              "seam_clip": item["seam_review"], "at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+              "limitations": "The operator confirmed an actual video; code did not semantically inspect pixels"}
+    item["seam_verification"] = record
+    write_json(root / "production" / "review" / f"seam_{left_id}_{right_id}_human.json", record)
+    event(state, "seam_verified", left=left_id, right=right_id, result=result)
+    save_state(root, state)
+    return state
+
+
+def prepare_continuity_reference(root: Path, project: dict, state: dict, shot_id: str) -> list[Path]:
+    """Optionally extract previous *approved source* frame for next Flow shot.
+
+    Requires shot.continuity.reference_previous_end=True. Never silently
+    transmits a previous shot frame if the director didn't opt in.
+    """
+    order = [shot["id"] for shot in project["shots"]]
+    i = order.index(shot_id)
+    if i == 0:
+        return []
+    shot = project["shots"][i]
+    if not shot.get("continuity", {}).get("reference_previous_end", False):
+        return []
+    previous = state["shots"][order[i-1]]
+    if previous["status"] != "approved" or not previous.get("approved_file"):
+        raise StudioError("Previous shot has not been approved; cannot create continuity reference")
+    from .core import need_binary
+    from .narrative import edit_range
+    import subprocess
+    origin = root / previous["approved_file"]
+    at = max(0.0, edit_range(project["shots"][i-1])[1] - 0.08)
+    destination = root / "production" / "continuity" / f"entry_ref_{shot_id}.png"
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    subprocess.run([need_binary("ffmpeg"), "-hide_banner", "-loglevel", "error", "-y", "-ss", f"{at:.3f}",
+                    "-i", str(origin), "-frames:v", "1", str(destination)],
+                   check=True, capture_output=True, timeout=60)
+    if not destination.is_file() or destination.stat().st_size < 100:
+        raise StudioError("Reference extraction failed: check previous clip and trim point")
+    return [destination]
 
 
 def verify_shot(root: Path, shot_id: str, result: str, note: str) -> dict:
@@ -360,6 +605,7 @@ def reject_shot(root: Path, shot_id: str, reason: str) -> dict:
     item = state["shots"][shot_id]
     item["status"] = "pending"
     item.pop("human_verification", None)
+    item.pop("seam_verification", None)
     state["phase"] = "ready_to_generate" if state["credits_remaining"] else "awaiting_extra_credit_approval"
     event(state, "rejected_shot", shot=shot_id, reason=reason)
     save_state(root, state)
@@ -405,7 +651,7 @@ def advance(root: Path, browser=None, config: Path | None = None) -> dict:
     """
     root, project = load_project(root)
     state = get_state(root)
-    if state["phase"] == "gemini_ready":
+    if state["phase"] in ("gemini_ready", "gemini_story_ready", "gemini_plan_ready"):
         return generate_gemini(root, config=config)
     assert_plan_unchanged(root, state)
     if state["phase"] != "ready_to_generate":
@@ -430,9 +676,12 @@ def advance(root: Path, browser=None, config: Path | None = None) -> dict:
     if browser is None:
         from .flow_browser import FlowBrowser
         browser = FlowBrowser(config)
-    # Fail fast for non-submission errors, before reserving any potential credit.
+    # Prepare any director-authorized visual continuation frame before reserving
+    # a paid attempt; never re-use a guessed image from an unapproved clip.
+    references = [root / r for r in state["references"]]
+    references += prepare_continuity_reference(root, project, state, shot_id)
     if hasattr(browser, "preflight"):
-        browser.preflight([root / r for r in state["references"]])
+        browser.preflight(references)
     # Reserve one potential paid generation BEFORE touching the web UI.
     state["credits_remaining"] -= 1
     item = state["shots"][shot_id]
@@ -442,7 +691,7 @@ def advance(root: Path, browser=None, config: Path | None = None) -> dict:
     event(state, "generation_attempt_reserved", shot=shot_id, attempt=item["attempts"])
     save_state(root, state)
     try:
-        output = browser.generate(root, project, next_shot, [root / r for r in state["references"]])
+        output = browser.generate(root, project, next_shot, references)
     except Exception as exc:
         # Do not retry automatically: web request may have consumed credits.
         event(state, "flow_error", shot=shot_id, error=f"{type(exc).__name__}: {str(exc)[:300]}")
@@ -471,13 +720,17 @@ def summary(state: dict) -> str:
     phase = state["phase"]
     instructions = {
         "gemini_ready": "Gemini web is ready: run advance (after verifying UI config).",
-        "gemini_submission_uncertain": "Inspect Gemini chat, then receive-gemini PROJECT --file JSON, or explicitly resolve-gemini --action retry. No automatic retry.",
-        "awaiting_storyboard_approval": "Review production/storyboard.md, prompts, project.json; then approve --stage storyboard (or edit and replan).",
+        "gemini_story_ready": "Stage 1: run advance for screenplay ONLY; Flow is not touched.",
+        "awaiting_story_approval": "Review production/story_bible.json; approve --stage story or revise story JSON. No shots have been sent to Flow.",
+        "gemini_plan_ready": "Stage 2: screenplay approved. Run advance to ask Gemini for storyboard + cut points.",
+        "gemini_submission_uncertain": "Check which Gemini stage was submitted; recover with receive-gemini --file JSON or operator-approved resolve-gemini. Never auto retry.",
+        "awaiting_storyboard_approval": "Review storyboard and continuity audit. For V1.3 director-first projects run director-review, fix reported hard problems, then approve storyboard.",
+        "director_review_uncertain": "Review submission uncertain; inspect Gemini chat. Use receive-director-review --file JSON or explicitly resolve-director-review --action retry.",
         "awaiting_credit_approval": "Verify your logged-in Flow session, model, aspect, costs and selectors, then approve --stage credits --max-generations N.",
         "ready_to_generate": "Run advance to generate one pending shot (or render if all approved).",
         "generation_uncertain": "Inspect Flow: submission may have consumed credits. Use resolve --shot ID, then receive the file. Never auto-retry.",
         "awaiting_download": "Download video in Flow and use receive --shot ID --file PATH.",
-        "awaiting_shot_approval": "Watch the styled review clip AND end-frame stills. For shots with acceptance/style, run verify-shot --shot ID --result pass --note ..., then approve --stage shot --shot ID; otherwise reject.",
+        "awaiting_shot_approval": "Watch single-shot review and adjacent seam. Run verify-shot; for continuity projects also verify-seam --left ID --right ID; then approve shot.",
         "awaiting_extra_credit_approval": "More paid generations require approve --stage credits --max-generations N.",
         "awaiting_final_approval": "Watch exports/final_master*.mp4, then approve --stage final.",
         "completed": "Completed. All assets and historical versions were retained.",

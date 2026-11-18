@@ -44,3 +44,14 @@ Default to `start --provider gemini-web --gemini-config <verified local config>`
 - Read postproduction.style/voice/subtitles from the user's requested look. Clean is default; surveillance HUD/timecode/noise must be rendered in post, not demanded of Flow.
 - Review the POSTPROCESSED preview, and first/middle/end images, with the user before passing a candidate. `verify-shot` records operator judgment, not automatic image understanding. Never mark it pass without user confirmation.
 - For dialogue and contact sound, verify the actual time of speech, subtitle appearance and sound cues against visible action; planned times are only drafts.
+
+
+## V1.3 narrative and editorial rules (default new Codex productions)
+
+1. **Story before storyboard.** For `gemini-web` start, inspect `story_bible.json` and obtain operator approval via `approve --stage story`. Do not invent a story approval, and never automatically retry uncertain browser submissions.
+2. Ask Gemini for shots only after screenplay approval (`advance --gemini-config`). Require shot-local `story_beat_ids`, `narrative_purpose`, `emotional_state`, `framing`, `coverage_type`, `continuity.entry/exit/link_from_previous`, and `edit` fields.
+3. Run a **separate** critical director pass (`director-review`) before storyboard approval. Present blocking findings verbatim; revise project JSON, run `replan`, and review again. Code audits structured logic but cannot judge actual video pixels.
+4. Distinguish Flow generated `duration` from the selected editorial `edit.source_in/source_out`. `dissolve` is an actual FFmpeg crossfade; match_action/match_eyeline/sound_bridge mark editorial intent only and render as cuts unless timed audio events are explicitly authored.
+5. Show actual pairwise seam previews. For strict continuity projects call `verify-seam` only **after explicit human assessment** of the audio/visual edit. Approve no adjacent shot until this passes. Do not silently fill in a pass result based on a metadata QA report.
+6. If `reference_previous_end` is enabled, upload only the frame extracted from the prior *approved* shot, and only via the configured visible Flow file input. No hidden API, unapproved previous candidate or speculative image.
+7. Preserve existing V1.2 projects and approvals. Never overwrite active project assets or retroactively mark old clips as approved. Read `docs/DIRECTOR_V13.md` before operating new V1.3 projects.
