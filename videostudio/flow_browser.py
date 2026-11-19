@@ -67,6 +67,7 @@ def one(page, selector: str, label: str):
 class FlowBrowser:
     def __init__(self, config_path: Path | None = None):
         self.config = load_ui(config_path)
+        self.on_submit = None  # optional event callback; does not prove paid Google job
 
     def preflight(self, references: list[Path]) -> None:
         """Read-only configuration and browser checks before reserving a paid attempt."""
@@ -137,6 +138,8 @@ class FlowBrowser:
             existing = page.locator(config["result_tile_selector"]).count() if config["result_tile_selector"] else None
             prompt.fill(shot_prompt(project, shot))
             button.click(timeout=15000)
+            if callable(self.on_submit):
+                self.on_submit(shot["id"])
             if not config["result_tile_selector"] or not config["result_download_selector"]:
                 return None
             tiles = page.locator(config["result_tile_selector"])

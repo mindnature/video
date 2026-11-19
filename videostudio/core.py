@@ -65,6 +65,8 @@ def validate(project: dict) -> None:
     for flag in ("voice", "subtitles"):
         if post.get(flag, "auto") not in ("auto", "on", "off"):
             raise StudioError(f"postproduction.{flag} must be auto/on/off")
+    from .delivery import validate_policy
+    validate_policy(project)
     from .narrative import validate_story, validate_shot_edit, validate_continuity
     if "story_bible" in project:
         validate_story(project["story_bible"])

@@ -69,6 +69,8 @@ def parser() -> argparse.ArgumentParser:
                    help="Chrome Gemini by default; API and template optional")
     a.add_argument("--gemini-config", type=Path, help="local verified Gemini web CSS selectors")
     a.add_argument("--quick-storyboard", action="store_true", help="legacy single Gemini plan; skip script-first review (not recommended)")
+    a.add_argument("--delivery", choices=["flow_dynamic", "animatic", "mixed_media"], default="flow_dynamic",
+                   help="declared deliverable: formal Flow performance vs labeled preview")
     status = sub.add_parser("status", help="show saved workflow and exact next action")
     status.add_argument("project")
     app = sub.add_parser("approve", help="human review gates: story, storyboard, credits, shot, final")
@@ -84,11 +86,16 @@ def parser() -> argparse.ArgumentParser:
     recv.add_argument("project")
     recv.add_argument("--shot", required=True)
     recv.add_argument("--file", required=True, type=Path)
+    recv.add_argument("--from-flow", action="store_true", help="operator attests this downloaded asset came from visible Google Flow")
     verify = sub.add_parser("verify-shot", help="record human visual end-state/style/audio review before approval")
     verify.add_argument("project")
     verify.add_argument("--shot", required=True)
     verify.add_argument("--result", choices=["pass", "fail"], required=True)
     verify.add_argument("--note", required=True)
+    verify.add_argument("--motion", choices=["pass", "fail", "not_applicable"],
+                        help="explicitly attest visible on-screen subject movement, not a Ken Burns still")
+    verify.add_argument("--identity", choices=["pass", "fail", "not_applicable"],
+                        help="human comparison of recurring character identity/age/wardrobe with approved shots")
     seam = sub.add_parser("verify-seam", help="human approval of an actual adjacent-shot edit preview")
     seam.add_argument("project")
     seam.add_argument("--left", required=True)
@@ -120,6 +127,21 @@ def parser() -> argparse.ArgumentParser:
     critic_retry = sub.add_parser("resolve-director-review", help="explicitly retry an uncertain reviewer turn")
     critic_retry.add_argument("project")
     critic_retry.add_argument("--action", choices=["retry"], required=True)
+    over = sub.add_parser("director-override", help="operator resolves contradictory director reviews with reason")
+    over.add_argument("project")
+    over.add_argument("--reason", required=True)
+    guide = sub.add_parser("voice-guide", help="write contrasting warm/somber narration audition guide")
+    guide.add_argument("project")
+    audition = sub.add_parser("voice-audition", help="register two real audio auditions before approving narration voice")
+    audition.add_argument("project")
+    audition.add_argument("--warm", type=Path, required=True)
+    audition.add_argument("--somber", type=Path, required=True)
+    audition.add_argument("--source", required=True)
+    voice_pass = sub.add_parser("voice-approve", help="operator signoff on audition naturalness")
+    voice_pass.add_argument("project")
+    voice_pass.add_argument("--note", required=True)
+    report = sub.add_parser("delivery-report", help="reconcile source evidence, allowed Flow attempts, voice and dynamic movement")
+    report.add_argument("project")
     gem_receive = sub.add_parser("receive-gemini", help="recover checked storyboard JSON from Gemini web response")
     gem_receive.add_argument("project")
     gem_receive.add_argument("--file", type=Path, required=True)
@@ -178,7 +200,7 @@ def main(argv: list[str] | None = None) -> int:
             count = args.shots or (6 if args.preset == "handcraft" else 4 if args.preset == "general" else 5)
             state = production.start(Path(args.name), args.idea, args.preset, args.title, count,
                                      args.reference, args.provider, gemini_config=args.gemini_config,
-                                     director_first=not args.quick_storyboard)
+                                     director_first=not args.quick_storyboard, delivery_mode=args.delivery)
             print(production.summary(state))
         elif args.command == "status":
             print(production.summary(production.get_state(Path(args.project).resolve())))
@@ -190,10 +212,10 @@ def main(argv: list[str] | None = None) -> int:
             state = production.advance(Path(args.project), config=args.gemini_config or args.flow_config)
             print(production.summary(state))
         elif args.command == "receive":
-            state = production.receive(Path(args.project), args.shot, args.file)
+            state = production.receive(Path(args.project), args.shot, args.file, from_flow=args.from_flow)
             print(production.summary(state))
         elif args.command == "verify-shot":
-            state = production.verify_shot(Path(args.project), args.shot, args.result, args.note)
+            state = production.verify_shot(Path(args.project), args.shot, args.result, args.note, args.motion, args.identity)
             print(production.summary(state))
         elif args.command == "verify-seam":
             state = production.verify_seam(Path(args.project), args.left, args.right, args.result, args.note)
@@ -224,6 +246,24 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "resolve-director-review":
             state = production.resolve_director_review(Path(args.project), args.action)
             print(production.summary(state))
+        elif args.command == "director-override":
+            print(production.summary(production.director_override(Path(args.project), args.reason)))
+        elif args.command == "voice-guide":
+            from .delivery import voice_guide
+            root, project = load_project(args.project)
+            print(f"Voice audition script: {voice_guide(root, project)}")
+        elif args.command == "voice-audition":
+            from .delivery import register_voice_audition
+            root, project = load_project(args.project)
+            print(json.dumps(register_voice_audition(root, args.warm, args.somber, args.source), ensure_ascii=False, indent=2))
+        elif args.command == "voice-approve":
+            from .delivery import approve_voice
+            root, project = load_project(args.project)
+            print(json.dumps(approve_voice(root, args.note), ensure_ascii=False, indent=2))
+        elif args.command == "delivery-report":
+            from .delivery import save_delivery_report
+            root, project = load_project(args.project)
+            print(json.dumps(save_delivery_report(root, project, production.get_state(root)), ensure_ascii=False, indent=2))
         elif args.command == "receive-gemini":
             state = production.receive_gemini(Path(args.project), args.file)
             print(production.summary(state))

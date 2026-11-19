@@ -1,8 +1,8 @@
-# Video Studio V1.3 — 剧本优先 · 连续性导演 · 可审核剪辑（Codex + Gemini + Flow）
+# Video Studio V1.4 — 真实动态交付 · 声音导演 · 额度对账（Codex + Gemini + Flow）
 
 **一句创意/参考图 → Gemini 故事圣经 → 人审 → Gemini 分镜 → 独立导演复核 → 人审 → Flow 逐镜生成 → 单镜及相邻镜头联审 → FFmpeg 按实际入出点剪辑 → 成片审核。**
 
-[**V1.3 导演流程：docs/DIRECTOR_V13.md**](docs/DIRECTOR_V13.md) · [入门：docs/ONE_CLICK.md](docs/ONE_CLICK.md) · [Codex Skill](.agents/skills/video-studio/SKILL.md)
+[**V1.4 正式交付说明：docs/DELIVERY_V14.md**](docs/DELIVERY_V14.md) · [V1.3 导演流程：docs/DIRECTOR_V13.md](docs/DIRECTOR_V13.md) · [入门：docs/ONE_CLICK.md](docs/ONE_CLICK.md) · [Codex Skill](.agents/skills/video-studio/SKILL.md)
 
 > 这是本地优先、可恢复的自动制片工作流。**一键表示只需要在 Codex 发起制作，审核节点仍由人决定**，不是绕过网站登录、付费额度或无需人工审核的无人值守服务。默认仅需 Chrome 中登录 Gemini 与 Google Flow，不需要 Gemini API Key；首次需校准两个网站的选择器。没有实时登录的 Flow 页面无法事先验证这些选择器是否仍适用。
 
@@ -73,7 +73,7 @@ video-studio approve projects/film --stage shot --shot 02
 
 不要提交密钥、Chrome 登录信息、原始图片、项目视频、浏览器截图或本机选择器配置到 GitHub；`projects/` 已加入 `.gitignore`。不要开放 Chrome CDP 端口。Flow 每镜头单次提交可能扣除额度，不保证自动生成成功。不支持绕过 Flow 安全检查、付费、验证码或发布到短视频平台。
 
-**状态：V1.2 通用制片质量控制 beta。** 自动化逻辑和模拟环境单元测试通过，但必须在你的真实 Google Flow 会话中完成端到端验证；浏览器 UI 依赖项不能在无账号登录环境中代替验证。
+**状态：V1.4 正式交付质量控制 beta。** 自动化逻辑和模拟环境单元测试通过，但必须在你的真实 Google Flow 会话中完成端到端验证；浏览器 UI 依赖项不能在无账号登录环境中代替验证。
 
 MIT License · [项目仓库](https://github.com/mindnature/video) · [Google Flow 官方帮助](https://support.google.com/flow/answer/16353334) · [Codex Skill 文档](https://developers.openai.com/api/reference/cli)
 
@@ -126,3 +126,13 @@ video-studio approve projects/my-film --stage shot --shot 01
 - **旧项目兼容**：未填写故事圣经、连续性与剪辑字段的项目沿用 V1.2 规则，不会因为升级而修改已生成视频或自动重拍。
 
 完整字段、命令与限制：[docs/DIRECTOR_V13.md](docs/DIRECTOR_V13.md)。V1.3 有本地测试覆盖，但还未在你的实际 Google Flow 网页完成真实端到端浏览器验证。
+
+## V1.4｜Flow 动态片、配音及生成账本
+
+- 新 `start` 默认 `--delivery flow_dynamic`，正式动态作品必须有 Flow 证据和人工运动验收；`--delivery animatic` 可交付明确标注的静帧预演，不能冒充 Flow 动态正片。
+- `receive --from-flow` 记录人工确认的网页下载来源；`verify-shot --motion pass --identity pass` 分别验收主体表演与重复人物身份。没有机器可凭 MP4 时长自动证明表演成立。
+- `delivery-report` 对账授权次数、可能扣费提交及已观察到的浏览器点击，并输出每镜来源、哈希、待解决事项。网页实际扣费仍需人工对照 Flow 历史核实。
+- `voice-guide` / `voice-audition` / `voice-approve` 为自然旁白提供两段真实试听与人审关口。旁白必须另行导入正式配音并检查实际音画字幕同步。
+- 导演复核最多自动 2 轮；意见冲突由用户选择，并使用 `director-override --reason` 记录。
+
+详见 [V1.4 中文说明](docs/DELIVERY_V14.md)。本地测试与 GitHub CI 成功不代表已经在用户的 Flow 账户中完成实际视频生成。

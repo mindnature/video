@@ -48,7 +48,7 @@ def event(state: dict, kind: str, **detail: Any) -> None:
 def start(root: Path, idea: str, mode: str, title: str, shots: int,
           reference_files: list[Path] | None = None, provider: str = "gemini-web",
           gemini_config: Path | None = None, gemini_browser=None,
-          director_first: bool = False) -> dict:
+          director_first: bool = False, delivery_mode: str | None = None) -> dict:
     """Generate a Gemini shot plan then stop at first human review gate."""
     root = root.expanduser().resolve()
     if state_file(root).exists() or (root / "project.json").exists():
@@ -70,6 +70,11 @@ def start(root: Path, idea: str, mode: str, title: str, shots: int,
             raise StudioError("Template only supports its preset shot count; choose 6 handcraft, 5 story, or 4 general")
     else:
         raise StudioError("provider must be gemini-web, gemini or template")
+    if delivery_mode is not None:
+        if delivery_mode not in ("flow_dynamic", "animatic", "mixed_media"):
+            raise StudioError("Invalid requested delivery mode")
+        project["delivery"] = {"kind": delivery_mode, "require_performance_review": delivery_mode == "flow_dynamic",
+                               "voice_review_required": False}
     # Do not start a browser or consume Flow credits here.
     root.mkdir(parents=True, exist_ok=True)
     write_json(root / "project.json", project)
@@ -86,6 +91,7 @@ def start(root: Path, idea: str, mode: str, title: str, shots: int,
     state = {"schema": 2, "title": project["title"],
              "phase": ("gemini_story_ready" if director_first else "gemini_ready") if provider == "gemini-web" else "awaiting_storyboard_approval",
              "director_first": bool(director_first and provider == "gemini-web"),
+             "director_review_rounds": 0, "requested_delivery": delivery_mode,
              "approved_story_digest": None, "director_review_digest": None, "director_review_pass": False,
              "gemini_step": "story" if director_first and provider == "gemini-web" else "plan",
              "idea": idea, "provider": provider, "references": saved_refs,
@@ -118,6 +124,19 @@ def _accept_gemini_plan(root: Path, state: dict, project: dict) -> dict:
         audit = continuity_audit(project)
         if not audit["ready"]:
             raise StudioError(f"Storyboard has {audit['errors']} blocking continuity issues")
+    if state.get("requested_delivery"):
+        requested = state["requested_delivery"]
+        spec = dict(project.get("delivery", {}))
+        spec["kind"] = requested  # User-selected deliverable cannot be weakened by Gemini.
+        spec["require_performance_review"] = requested == "flow_dynamic"
+        narrator = any(str(line.get("speaker", "")).lower() in ("旁白", "narrator", "voiceover", "解说")
+                       for shot in project["shots"] for line in shot.get("dialogue", []))
+        spec["voice_review_required"] = bool(spec.get("voice_review_required", False) or narrator)
+        project["delivery"] = spec
+        if narrator:
+            project.setdefault("postproduction", {})["voice"] = "on"
+        from .delivery import validate_policy
+        validate_policy(project)
     # Save validated JSON, then export files. A crashed handoff remains in
     # gemini_submission_uncertain; never automatically submit another prompt.
     write_json(root / "project.json", project)
@@ -240,6 +259,8 @@ def director_review(root: Path, browser=None, config: Path | None = None) -> dic
     state = get_state(root)
     if not state.get("director_first") or state["phase"] != "awaiting_storyboard_approval":
         raise StudioError("Director review is only available at the storyboard gate of a two-stage project")
+    if state.get("director_review_rounds", 0) >= 2:
+        raise StudioError("Director review capped at two rounds. Fix concrete issues or use director-override with human reasoning; avoid endless contradictions")
     from .quality import audit_plan
     check = audit_plan(project)
     if not check["ready"]:
@@ -249,7 +270,8 @@ def director_review(root: Path, browser=None, config: Path | None = None) -> dic
         browser = GeminiBrowser(config)
     browser.preflight([])
     state["phase"] = "director_review_uncertain"
-    event(state, "director_review_submitted")
+    state["director_review_rounds"] = state.get("director_review_rounds", 0) + 1
+    event(state, "director_review_submitted", round=state["director_review_rounds"])
     save_state(root, state)
     try:
         result = browser.review_plan(project)
@@ -277,6 +299,27 @@ def resolve_director_review(root: Path, action: str) -> dict:
         raise StudioError("Only an explicitly approved retry can resolve an uncertain director review")
     state["phase"] = "awaiting_storyboard_approval"
     event(state, "director_review_retry_authorized")
+    save_state(root, state)
+    return state
+
+
+def director_override(root: Path, note: str) -> dict:
+    """Human director can resolve model-review stalemates; record explicit responsibility."""
+    root, project = load_project(root)
+    state = get_state(root)
+    if not state.get("director_first") or state["phase"] != "awaiting_storyboard_approval":
+        raise StudioError("No director decision awaiting override")
+    if state.get("director_review_rounds", 0) < 1 or not (root / "production/director_review.json").is_file():
+        raise StudioError("At least one complete director review is required")
+    if len(note.strip()) < 12:
+        raise StudioError("Explain the creative decision in at least 12 characters")
+    from .quality import audit_plan
+    if not audit_plan(project)["ready"]:
+        raise StudioError("Cannot override structural plan errors")
+    state["director_review_pass"] = True
+    state["director_review_digest"] = digest(root / "project.json")
+    state["director_override_note"] = note.strip()
+    event(state, "human_director_decision", reason=note.strip())
     save_state(root, state)
     return state
 
@@ -362,6 +405,17 @@ def approve(root: Path, stage: str, shot_id: str | None = None, max_generations:
         if not item["candidates"]:
             raise StudioError("Cannot approve without a real imported file")
         selected_shot = next(s for s in project["shots"] if s["id"] == shot_id)
+        if project.get("delivery", {}).get("kind") == "flow_dynamic":
+            from .delivery import delivery_audit
+            evidence = item.get("candidate_evidence", {}).get(item["candidates"][-1], {})
+            if evidence.get("origin") not in ("flow_browser", "operator_attested_flow"):
+                raise StudioError("Formal Flow dynamic video requires recorded Flow source evidence; use receive --from-flow for an operator-confirmed download")
+            if item.get("human_verification", {}).get("motion") != "pass":
+                raise StudioError("Human dynamic performance verification required; run verify-shot --motion pass after watching real movement")
+            characters = [name for name in selected_shot.get("cast", [])
+                          if sum(name in other.get("cast", []) for other in project["shots"]) > 1]
+            if characters and item.get("human_verification", {}).get("identity") != "pass":
+                raise StudioError("Recurring character identity/age/wardrobe needs human comparison; verify-shot --identity pass")
         requires_check = bool(selected_shot.get("acceptance")) or project.get("postproduction", {}).get("style", "clean") != "clean"
         if requires_check and item.get("human_verification", {}).get("result") != "pass":
             raise StudioError("Run 'verify-shot --shot ID --result pass --note ...' after watching the entire candidate and its end frame")
@@ -395,6 +449,10 @@ def approve(root: Path, stage: str, shot_id: str | None = None, max_generations:
         master = state.get("master")
         if not master or not (root / master).is_file():
             raise StudioError("Final video is missing")
+        from .delivery import save_delivery_report
+        report = save_delivery_report(root, project, state)
+        if not report["ready"]:
+            raise StudioError("Final delivery contract not satisfied; inspect production/delivery_report.json")
         state["phase"] = "completed"
         event(state, "approved_final", master=master)
     else:
@@ -403,7 +461,7 @@ def approve(root: Path, stage: str, shot_id: str | None = None, max_generations:
     return state
 
 
-def receive(root: Path, shot_id: str, media: Path) -> dict:
+def receive(root: Path, shot_id: str, media: Path, from_flow: bool = False) -> dict:
     root, project = load_project(root)
     state = get_state(root)
     assert_plan_unchanged(root, state)
@@ -420,13 +478,18 @@ def receive(root: Path, shot_id: str, media: Path) -> dict:
     if not any(stream.get("codec_type") == "video" for stream in info.get("streams", [])):
         raise StudioError("Downloaded media has no video stream")
     dest = ingest(root, project, shot_id, media, "video")
-    _record_candidate(root, state, shot_id, dest)
+    _record_candidate(root, state, shot_id, dest,
+                      origin="operator_attested_flow" if from_flow else "other",
+                      attestation="Operator confirmed download from visible Flow UI" if from_flow else "")
     return state
 
 
-def _record_candidate(root: Path, state: dict, shot_id: str, dest: Path) -> None:
+def _record_candidate(root: Path, state: dict, shot_id: str, dest: Path,
+                      origin: str = "other", attestation: str = "") -> None:
     item = state["shots"][shot_id]
     relative = dest.relative_to(root).as_posix()
+    from .delivery import register_candidate
+    register_candidate(root, state, shot_id, dest, origin, attestation=attestation)
     item["candidates"].append(relative)
     item["status"] = "awaiting_review"
     state["phase"] = "awaiting_shot_approval"
@@ -575,7 +638,7 @@ def prepare_continuity_reference(root: Path, project: dict, state: dict, shot_id
     return [destination]
 
 
-def verify_shot(root: Path, shot_id: str, result: str, note: str) -> dict:
+def verify_shot(root: Path, shot_id: str, result: str, note: str, motion: str | None = None, identity: str | None = None) -> dict:
     """Record a real human's assessment of visible video, not an AI guess."""
     root, project = load_project(root)
     state = get_state(root)
@@ -584,7 +647,13 @@ def verify_shot(root: Path, shot_id: str, result: str, note: str) -> dict:
     if result not in ("pass", "fail") or not note.strip():
         raise StudioError("Specify --result pass/fail and a human-reviewed --note")
     item = state["shots"][shot_id]
-    item["human_verification"] = {"result": result, "note": note, "at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
+    if motion not in (None, "pass", "fail", "not_applicable"):
+        raise StudioError("motion must be pass/fail/not_applicable")
+    if identity not in (None, "pass", "fail", "not_applicable"):
+        raise StudioError("identity must be pass/fail/not_applicable")
+    if result == "pass" and (motion == "fail" or identity == "fail"):
+        raise StudioError("Cannot mark shot pass while motion or character identity fails")
+    item["human_verification"] = {"result": result, "motion": motion, "identity": identity, "note": note, "at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
     from .quality import acceptance_checks
     candidate = item["candidates"][-1]
     shot = next(s for s in project["shots"] if s["id"] == shot_id)
@@ -662,6 +731,10 @@ def advance(root: Path, browser=None, config: Path | None = None) -> dict:
         write_json(root / "production" / "qa_report.json", report)
         if not report["ready"]:
             raise StudioError("QA failed, cannot render. Inspect production/qa_report.json")
+        from .delivery import save_delivery_report
+        deliverable = save_delivery_report(root, project, state)
+        if not deliverable["ready"]:
+            raise StudioError("Delivery quality gate failed; see production/delivery_report.json")
         master = render(root, project)
         state["master"] = master.relative_to(root).as_posix()
         state["phase"] = "awaiting_final_approval"
@@ -682,6 +755,14 @@ def advance(root: Path, browser=None, config: Path | None = None) -> dict:
     references += prepare_continuity_reference(root, project, state, shot_id)
     if hasattr(browser, "preflight"):
         browser.preflight(references)
+    # The browser reports a *visible click*, not actual Google billing completion.
+    # A submission interrupted after click is still counted as possible spend.
+    if browser.__class__.__name__ == "FlowBrowser" and hasattr(browser, "on_submit"):
+        def observe_click(observed_shot: str) -> None:
+            event(state, "flow_button_clicked", shot=observed_shot,
+                  attempt=state["shots"][observed_shot]["attempts"])
+            save_state(root, state)
+        browser.on_submit = observe_click
     # Reserve one potential paid generation BEFORE touching the web UI.
     state["credits_remaining"] -= 1
     item = state["shots"][shot_id]
@@ -712,7 +793,7 @@ def advance(root: Path, browser=None, config: Path | None = None) -> dict:
             save_state(root, state)
             raise StudioError("Flow download could not be verified; manual recovery required") from exc
         dest = ingest(root, project, shot_id, Path(output), "video")
-        _record_candidate(root, state, shot_id, dest)
+        _record_candidate(root, state, shot_id, dest, origin="flow_browser")
     return state
 
 

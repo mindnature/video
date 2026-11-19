@@ -53,3 +53,13 @@ Read `docs/DIRECTOR_V13.md`. After `start`, show only `story_bible.json` and obt
 For an approved predecessor + new candidate, the project emits `production/review/seams/seam_LEFT_RIGHT_*.mp4`. Ask the user to watch the seam; if continuous, `verify-seam --left ... --right ... --result pass --note ...`, then approve shot. Rejection retains all original versions. If frame reference is opted in, project extracts only an approved previous shot's actual end frame. A shot 8s long might be edited to 3s using `edit`, so review `edit_timeline.json` before reporting final duration.
 
 All Gemini/Flow browser interactions are best effort against the user's current visible UI. No claims of end-to-end video generation without watching actual downloaded video and collecting operator approvals. Do NOT submit more Flow attempts based solely on the user's agreement to edit the script.
+
+## V1.4 delivery proof, genuine voice and human director lock
+
+**Overrides older quick workflow guidance for newly started projects.** Read `docs/DELIVERY_V14.md`. Default CLI `start --delivery flow_dynamic`: never substitute a photo-based animatic for authorized Flow performance or claim a static Ken Burns preview is the completed film. After downloading each actual Flow shot, record origin (manual `receive --from-flow` is an operator attestation, not Google proof). Before shot approval, require `verify-shot --motion pass`; for recurring actors also `--identity pass`, based on actual human video review. Preserve source file hash and version.
+
+Use `delivery-report` to reconcile authorized attempts, possible spent attempts, observed UI clicks and remaining budget; distinguish observed clicks from Google's actual billed count. Never invent or silently perform an extra click. After two Gemini director-review rounds, stop; honor approved creative choices and use only an explicitly reasoned `director-override` for a human decision.
+
+For narrated productions, use `voice-guide` to identify contrasting samples, import warm and somber auditions with `voice-audition`, obtain `voice-approve`, then import final line recordings via `ingest --kind voice`. Don't use unapproved default Windows TTS in a formal release. Verify real audio, contact sounds, subtitle timing and tone by watching and listening; the application does not have automatic human voice scoring, Google billing API, or word-level ASR alignment.
+
+Only report a formally completed movie after every approved shot has source+motion evidence, `delivery-report` is ready, the real master exists, and the operator approves final. `render` is merely a technical export, not proof of formal delivery.
