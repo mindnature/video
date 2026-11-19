@@ -144,10 +144,16 @@ def _voice_gate(root: Path, project: dict) -> list[str]:
     issues = []
     if project.get("postproduction", {}).get("voice", "auto") == "off":
         issues.append("Narration is required but postproduction.voice is disabled")
+    from .jianying import approved_track
+    full_track = None
+    try:
+        full_track = approved_track(root, project)
+    except StudioError as exc:
+        return [f"Jianying full narration: {exc}"]
     index = asset_index(root)
     for line in lines_with_offsets(project):
         if str(line.get("speaker", "")).lower() in ("旁白", "narrator", "voiceover", "解说"):
-            if not selected_asset(root, index, "voice", line["id"]):
+            if not full_track and not selected_asset(root, index, "voice", line["id"]):
                 issues.append(f"Narration line {line['id']} has no imported replacement voice")
     if issues:
         return issues

@@ -259,6 +259,11 @@ def export(project_root: Path, project: dict) -> Path:
         for n, d in enumerate(dialogues, start=1)
     )
     (output / "subtitles.srt").write_text(subtitles + ("\n" if subtitles else ""), encoding="utf-8")
+    # A copy-ready Jianying narration handoff accompanies every dialogue plan.
+    # This only creates local text/CSV, never calls the editor or a TTS service.
+    if dialogues:
+        from .jianying import make_pack
+        make_pack(project_root, project)
     write_json(output / "shot_list.json", [{"id": s["id"], "duration": s["duration"], "prompt": f"prompts/shot_{s['id']}.txt"} for s in project["shots"]])
     return output
 
@@ -402,7 +407,10 @@ def render(root: Path, project: dict, output: Path | None = None, mix_voice: boo
         raise StudioError("No shots selected for render")
     post = project.get("postproduction", {})
     index = asset_index(root)
-    voice_files = any(selected_asset(root, index, "voice", l["id"]) for l in lines_with_offsets(selected_project))
+    from .jianying import approved_track
+    jianying = approved_track(root, project) if shot_ids is None else None
+    voice_files = (any(selected_asset(root, index, "voice", l["id"]) for l in lines_with_offsets(selected_project))
+                   or bool(jianying))
     if mix_voice is None:
         mix_voice = post.get("voice", "auto") == "on" or (post.get("voice", "auto") == "auto" and voice_files)
     if burn_subtitles is None:
@@ -451,7 +459,10 @@ def render(root: Path, project: dict, output: Path | None = None, mix_voice: boo
     join_edited_clips(pieces, selected_project["shots"], joined, fps)
     current = joined
     voices = []
-    for line in lines_with_offsets(selected_project):
+    if jianying and mix_voice:
+        # A full-duration narration asset includes intentional silent passages.
+        voices.append((0.0, jianying[0], 1.0))
+    for line in ([] if jianying else lines_with_offsets(selected_project)):
         file = selected_asset(root, index, "voice", line["id"])
         if mix_voice and file and file.is_file():
             voices.append((line["absolute_start"], file, 1.0))
@@ -484,7 +495,7 @@ def render(root: Path, project: dict, output: Path | None = None, mix_voice: boo
         run(cmd)
         current = voiced
     if burn_subtitles:
-        captions = lines_with_offsets(selected_project)
+        captions = jianying[1] if jianying else lines_with_offsets(selected_project)
         if not captions:
             raise StudioError("No dialogue to burn; use captions only for projects with dialogue")
         subtitle = root / "work" / "render_subtitles.srt"
@@ -507,6 +518,12 @@ def qa(root: Path, project: dict) -> dict:
     index = asset_index(root)
     checks = list(plan["findings"])
     voice_policy = project.get("postproduction", {}).get("voice", "auto")
+    from .jianying import approved_track
+    jianying_full = None
+    try:
+        jianying_full = approved_track(root, project)
+    except StudioError as exc:
+        checks.append({"level": "ERROR", "message": f"Jianying voice approval: {exc}"})
     for shot in project["shots"]:
         src = selected_asset(root, index, "shots", shot["id"])
         if not src or not src.is_file():
@@ -532,6 +549,8 @@ def qa(root: Path, project: dict) -> dict:
                 checks.append({"shot": shot["id"], "level": "ERROR", "message": f"missing sound cue: {cue['path']}"})
     for line in lines_with_offsets(project):
         file = selected_asset(root, index, "voice", line["id"])
+        if jianying_full:
+            continue
         if not file:
             checks.append({"shot": line["shot"], "level": "ERROR" if voice_policy == "on" else "WARN",
                            "message": f"no replacement voice for {line['id']}; source speech may still be used"})

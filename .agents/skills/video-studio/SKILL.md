@@ -63,3 +63,8 @@ Use `delivery-report` to reconcile authorized attempts, possible spent attempts,
 For narrated productions, use `voice-guide` to identify contrasting samples, import warm and somber auditions with `voice-audition`, obtain `voice-approve`, then import final line recordings via `ingest --kind voice`. Don't use unapproved default Windows TTS in a formal release. Verify real audio, contact sounds, subtitle timing and tone by watching and listening; the application does not have automatic human voice scoring, Google billing API, or word-level ASR alignment.
 
 Only report a formally completed movie after every approved shot has source+motion evidence, `delivery-report` is ready, the real master exists, and the operator approves final. `render` is merely a technical export, not proof of formal delivery.
+
+
+## V1.5 Jianying audio handoff (official-visible desktop UI only)
+
+If the user wants 剪映 (Jianying) voices or natural Chinese narration, read `docs/JIANYING_V15.md`. A planned narration automatically gets `production/jianying` text/CSV/timing templates, or run `video-studio jianying-pack PROJECT`. Ask the user to choose a voice and use Jianying text-to-speech in the visible desktop app, export audio, then call `jianying-import --audio PATH --full-track` for a full-timeline track (or `--line LINE_ID` per utterance). User must check/edit `alignment.json` against actual voice phonemes, approve with `jianying-approve --note ...`, and keep V1.4 warm/somber `voice-audition` / `voice-approve` where required. Only validated, approved tracks may reach the final FFmpeg output; source file hashes and prior versions are retained. Do not invent an official Jianying API or claim automatic TTS, voice naturalness scoring, or forced alignment.

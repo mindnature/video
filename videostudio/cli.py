@@ -140,6 +140,19 @@ def parser() -> argparse.ArgumentParser:
     voice_pass = sub.add_parser("voice-approve", help="operator signoff on audition naturalness")
     voice_pass.add_argument("project")
     voice_pass.add_argument("--note", required=True)
+    jpack = sub.add_parser("jianying-pack", help="export Jianying desktop text-to-speech script, timecodes and instructions")
+    jpack.add_argument("project")
+    jimport = sub.add_parser("jianying-import", help="archive an exported Jianying voice file: per-line or aligned full film track")
+    jimport.add_argument("project")
+    jimport.add_argument("--audio", type=Path, required=True)
+    jmode = jimport.add_mutually_exclusive_group(required=True)
+    jmode.add_argument("--line", help="voice line ID from the exported voice_lines.csv")
+    jmode.add_argument("--full-track", action="store_true", help="single exported track aligned to the complete film timeline")
+    japprove = sub.add_parser("jianying-approve", help="approve actual full-track narration, timing and subtitle checks")
+    japprove.add_argument("project")
+    japprove.add_argument("--note", required=True)
+    jstatus = sub.add_parser("jianying-status", help="show Jianying voice approval and imported assets")
+    jstatus.add_argument("project")
     report = sub.add_parser("delivery-report", help="reconcile source evidence, allowed Flow attempts, voice and dynamic movement")
     report.add_argument("project")
     gem_receive = sub.add_parser("receive-gemini", help="recover checked storyboard JSON from Gemini web response")
@@ -260,6 +273,18 @@ def main(argv: list[str] | None = None) -> int:
             from .delivery import approve_voice
             root, project = load_project(args.project)
             print(json.dumps(approve_voice(root, args.note), ensure_ascii=False, indent=2))
+        elif args.command in ("jianying-pack", "jianying-import", "jianying-approve", "jianying-status"):
+            from . import jianying
+            root, project = load_project(args.project)
+            if args.command == "jianying-pack":
+                print(f"Jianying voice pack: {jianying.make_pack(root, project)}")
+            elif args.command == "jianying-import":
+                print(json.dumps(jianying.import_audio(root, project, args.audio, line_id=args.line,
+                                                      full_track=args.full_track), ensure_ascii=False, indent=2))
+            elif args.command == "jianying-approve":
+                print(json.dumps(jianying.approve(root, project, args.note), ensure_ascii=False, indent=2))
+            else:
+                print(json.dumps(jianying.status(root, project), ensure_ascii=False, indent=2))
         elif args.command == "delivery-report":
             from .delivery import save_delivery_report
             root, project = load_project(args.project)

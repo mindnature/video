@@ -65,3 +65,8 @@ Use `delivery-report` to reconcile authorized attempts, possible spent attempts,
 For narrated productions, use `voice-guide` to identify contrasting samples, import warm and somber auditions with `voice-audition`, obtain `voice-approve`, then import final line recordings via `ingest --kind voice`. Don't use unapproved default Windows TTS in a formal release. Verify real audio, contact sounds, subtitle timing and tone by watching and listening; the application does not have automatic human voice scoring, Google billing API, or word-level ASR alignment.
 
 Only report a formally completed movie after every approved shot has source+motion evidence, `delivery-report` is ready, the real master exists, and the operator approves final. `render` is merely a technical export, not proof of formal delivery.
+
+
+## V1.5 剪映自然旁白（可见桌面操作 + 本地音频桥接）
+
+当用户要求更自然的配音或特别指定剪映：读 `docs/JIANYING_V15.md`。使用 `jianying-pack PROJECT` 将已批准影片的台词做成可复制的配音文本/时间轴，并让用户在剪映专业版亲自挑选声音、制作温暖/克制试听、导出合法音轨。严禁声称本工具可使用剪映的非公开 API 或无人工参与地生成剪映声音。`jianying-import --full-track` 保存有意保留静音区域的全片音轨；`jianying-approve` 只有人工核对 `alignment.json` 实际语音起止后才生效；`jianying-status` 用于查看。逐句版本使用 `--line ID`。既有 `voice-audition`/`voice-approve` 审核照旧；不得用未验收音频假称成片配音成功。不允许自动克隆未经授权的真人声线。

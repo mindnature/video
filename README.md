@@ -1,8 +1,8 @@
-# Video Studio V1.4 — 真实动态交付 · 声音导演 · 额度对账（Codex + Gemini + Flow）
+# Video Studio V1.5 — 剪映配音工作台 · 真实动态交付（Codex + Gemini + Flow）
 
 **一句创意/参考图 → Gemini 故事圣经 → 人审 → Gemini 分镜 → 独立导演复核 → 人审 → Flow 逐镜生成 → 单镜及相邻镜头联审 → FFmpeg 按实际入出点剪辑 → 成片审核。**
 
-[**V1.4 正式交付说明：docs/DELIVERY_V14.md**](docs/DELIVERY_V14.md) · [V1.3 导演流程：docs/DIRECTOR_V13.md](docs/DIRECTOR_V13.md) · [入门：docs/ONE_CLICK.md](docs/ONE_CLICK.md) · [Codex Skill](.agents/skills/video-studio/SKILL.md)
+[**V1.5 剪映配音指南：docs/JIANYING_V15.md**](docs/JIANYING_V15.md) · [**V1.4 正式交付说明：docs/DELIVERY_V14.md**](docs/DELIVERY_V14.md) · [V1.3 导演流程：docs/DIRECTOR_V13.md](docs/DIRECTOR_V13.md) · [入门：docs/ONE_CLICK.md](docs/ONE_CLICK.md) · [Codex Skill](.agents/skills/video-studio/SKILL.md)
 
 > 这是本地优先、可恢复的自动制片工作流。**一键表示只需要在 Codex 发起制作，审核节点仍由人决定**，不是绕过网站登录、付费额度或无需人工审核的无人值守服务。默认仅需 Chrome 中登录 Gemini 与 Google Flow，不需要 Gemini API Key；首次需校准两个网站的选择器。没有实时登录的 Flow 页面无法事先验证这些选择器是否仍适用。
 
@@ -73,7 +73,7 @@ video-studio approve projects/film --stage shot --shot 02
 
 不要提交密钥、Chrome 登录信息、原始图片、项目视频、浏览器截图或本机选择器配置到 GitHub；`projects/` 已加入 `.gitignore`。不要开放 Chrome CDP 端口。Flow 每镜头单次提交可能扣除额度，不保证自动生成成功。不支持绕过 Flow 安全检查、付费、验证码或发布到短视频平台。
 
-**状态：V1.4 正式交付质量控制 beta。** 自动化逻辑和模拟环境单元测试通过，但必须在你的真实 Google Flow 会话中完成端到端验证；浏览器 UI 依赖项不能在无账号登录环境中代替验证。
+**状态：V1.5 剪映配音桥接 beta。** 自动化逻辑和模拟环境单元测试通过，但必须在你的真实 Google Flow 会话中完成端到端验证；浏览器 UI 依赖项不能在无账号登录环境中代替验证。
 
 MIT License · [项目仓库](https://github.com/mindnature/video) · [Google Flow 官方帮助](https://support.google.com/flow/answer/16353334) · [Codex Skill 文档](https://developers.openai.com/api/reference/cli)
 
@@ -136,3 +136,20 @@ video-studio approve projects/my-film --stage shot --shot 01
 - 导演复核最多自动 2 轮；意见冲突由用户选择，并使用 `director-override --reason` 记录。
 
 详见 [V1.4 中文说明](docs/DELIVERY_V14.md)。本地测试与 GitHub CI 成功不代表已经在用户的 Flow 账户中完成实际视频生成。
+
+
+## V1.5｜剪映配音交接（无需剪映 API Key）
+
+现在 `plan` 也会导出可直接复制到剪映的文稿与时间轴（`production/jianying/`）。用户在剪映可见桌面界面选声、朗读和导出后，支持两种导入：
+
+```powershell
+video-studio jianying-pack projects/film
+video-studio jianying-import projects/film --audio "D:\Audio\narration.wav" --full-track
+# 听查并修改 production/jianying/alignment.json 的实际起止时间
+video-studio jianying-approve projects/film --note "核对了全部旁白、留白、字幕同步"
+video-studio jianying-status projects/film
+# 或逐句导入：
+video-studio jianying-import projects/film --audio "D:\Audio\line.wav" --line 01_01
+```
+
+已批准的整片旁白会自动混入成片并使用手工核对的字幕时码。未批准、被修改或与当前剪辑不匹配的音轨不能静默替换正式旁白；旧声轨仍保留。**不声称可以远程控制剪映界面、自动从剪映 TTS 服务取音频或自动进行字级 ASR 对齐。** 查看 [V1.5 全流程](docs/JIANYING_V15.md)。
